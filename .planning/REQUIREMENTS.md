@@ -127,20 +127,68 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| CONF-01 through CONF-05 | Pending | Pending |
-| AUTH-01 through AUTH-09 | Pending | Pending |
-| AUTHZ-01 through AUTHZ-08 | Pending | Pending |
-| CASE-01 through CASE-09 | Pending | Pending |
-| DATA-01 through DATA-07 | Pending | Pending |
-| OPS-01 through OPS-06 | Pending | Pending |
-| WEB-01 through WEB-05 | Pending | Pending |
-| REL-01 through REL-05 | Pending | Pending |
+| CONF-01 | Phase 1: Contract Characterization & Fail-Closed Configuration | Pending |
+| CONF-02 | Phase 1: Contract Characterization & Fail-Closed Configuration | Pending |
+| CONF-03 | Phase 1: Contract Characterization & Fail-Closed Configuration | Pending |
+| CONF-04 | Phase 1: Contract Characterization & Fail-Closed Configuration | Pending |
+| CONF-05 | Phase 1: Contract Characterization & Fail-Closed Configuration | Pending |
+| AUTH-01 | Phase 3: Identity & Secure Session Boundary | Pending |
+| AUTH-02 | Phase 3: Identity & Secure Session Boundary | Pending |
+| AUTH-03 | Phase 3: Identity & Secure Session Boundary | Pending |
+| AUTH-04 | Phase 3: Identity & Secure Session Boundary | Pending |
+| AUTH-05 | Phase 3: Identity & Secure Session Boundary | Pending |
+| AUTH-06 | Phase 3: Identity & Secure Session Boundary | Pending |
+| AUTH-07 | Phase 3: Identity & Secure Session Boundary | Pending |
+| AUTH-08 | Phase 3: Identity & Secure Session Boundary | Pending |
+| AUTH-09 | Phase 3: Identity & Secure Session Boundary | Pending |
+| AUTHZ-01 | Phase 4: Authorization, Case Integrity & Consent-Gated Messaging | Pending |
+| AUTHZ-02 | Phase 4: Authorization, Case Integrity & Consent-Gated Messaging | Pending |
+| AUTHZ-03 | Phase 4: Authorization, Case Integrity & Consent-Gated Messaging | Pending |
+| AUTHZ-04 | Phase 4: Authorization, Case Integrity & Consent-Gated Messaging | Pending |
+| AUTHZ-05 | Phase 4: Authorization, Case Integrity & Consent-Gated Messaging | Pending |
+| AUTHZ-06 | Phase 4: Authorization, Case Integrity & Consent-Gated Messaging | Pending |
+| AUTHZ-07 | Phase 4: Authorization, Case Integrity & Consent-Gated Messaging | Pending |
+| AUTHZ-08 | Phase 5: Observability & Server-Rendered HTTP Safety | Pending |
+| CASE-01 | Phase 4: Authorization, Case Integrity & Consent-Gated Messaging | Pending |
+| CASE-02 | Phase 4: Authorization, Case Integrity & Consent-Gated Messaging | Pending |
+| CASE-03 | Phase 4: Authorization, Case Integrity & Consent-Gated Messaging | Pending |
+| CASE-04 | Phase 4: Authorization, Case Integrity & Consent-Gated Messaging | Pending |
+| CASE-05 | Phase 4: Authorization, Case Integrity & Consent-Gated Messaging | Pending |
+| CASE-06 | Phase 4: Authorization, Case Integrity & Consent-Gated Messaging | Pending |
+| CASE-07 | Phase 4: Authorization, Case Integrity & Consent-Gated Messaging | Pending |
+| CASE-08 | Phase 4: Authorization, Case Integrity & Consent-Gated Messaging | Pending |
+| CASE-09 | Phase 4: Authorization, Case Integrity & Consent-Gated Messaging | Pending |
+| DATA-01 | Phase 2: SQLite Lifecycle & Recovery Foundation | Pending |
+| DATA-02 | Phase 2: SQLite Lifecycle & Recovery Foundation | Pending |
+| DATA-03 | Phase 2: SQLite Lifecycle & Recovery Foundation | Pending |
+| DATA-04 | Phase 2: SQLite Lifecycle & Recovery Foundation | Pending |
+| DATA-05 | Phase 2: SQLite Lifecycle & Recovery Foundation | Pending |
+| DATA-06 | Phase 2: SQLite Lifecycle & Recovery Foundation | Pending |
+| DATA-07 | Phase 2: SQLite Lifecycle & Recovery Foundation | Pending |
+| OPS-01 | Phase 5: Observability & Server-Rendered HTTP Safety | Pending |
+| OPS-02 | Phase 5: Observability & Server-Rendered HTTP Safety | Pending |
+| OPS-03 | Phase 5: Observability & Server-Rendered HTTP Safety | Pending |
+| OPS-04 | Phase 5: Observability & Server-Rendered HTTP Safety | Pending |
+| OPS-05 | Phase 5: Observability & Server-Rendered HTTP Safety | Pending |
+| OPS-06 | Phase 6: Container, Deployment & Rollback Hardening | Pending |
+| WEB-01 | Phase 5: Observability & Server-Rendered HTTP Safety | Pending |
+| WEB-02 | Phase 5: Observability & Server-Rendered HTTP Safety | Pending |
+| WEB-03 | Phase 5: Observability & Server-Rendered HTTP Safety | Pending |
+| WEB-04 | Phase 6: Container, Deployment & Rollback Hardening | Pending |
+| WEB-05 | Phase 6: Container, Deployment & Rollback Hardening | Pending |
+| REL-01 | Phase 7: Pilot Verification & Release Gate | Pending |
+| REL-02 | Phase 7: Pilot Verification & Release Gate | Pending |
+| REL-03 | Phase 7: Pilot Verification & Release Gate | Pending |
+| REL-04 | Phase 7: Pilot Verification & Release Gate | Pending |
+| REL-05 | Phase 7: Pilot Verification & Release Gate | Pending |
 
 **Coverage:**
 - v1 requirements: 54 total
-- Mapped to phases: 0
-- Unmapped: 58 ⚠️
+- Mapped to phases: 54
+- Unmapped: 0
+- Duplicate mappings: 0
+- Coverage: 100% ✓
 
 ---
 *Requirements defined: 2026-10-19*
-*Last updated: 2026-10-19 after research-backed project initialization*
+*Last updated: 2026-10-19 after roadmap creation; all v1 requirements mapped exactly once*
