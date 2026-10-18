@@ -4,73 +4,84 @@
 
 ## APIs & External Services
 
-**HTTP API:**
-- FastAPI exposes the local CareFlow service from `careflow/api.py` with `POST /auth/login`, `POST /auth/logout`, `GET /auth/current-user`, `POST /cases`, transition and assignment routes, `GET /cases/{case_id}`, `GET /worklist`, and `GET /metrics`; these are inbound application routes, not integrations with a third-party API.
-- No outbound API client, remote base URL, webhook client, SDK for a cloud service, SMTP client, or message-broker client is detected in `careflow/`.
-- `httpx==0.28.1` appears in `requirements.txt` and `requirements.lock` to support FastAPI's test client in `tests/test_api.py`; it is not used for production outbound calls.
+**Inbound HTTP:**
+- FastAPI exposes the local application from `careflow/api.py`: signed-session login/logout/current-user routes, case creation/read/transition/assignment routes, patient status, message-draft routes, worklist, and metrics. These are application endpoints, not third-party integrations.
+- `Accept: text/html` selects Jinja2 rendering through `careflow/templates/*.html`; JSON remains the default for API clients. Static CSS is served from `careflow/static/` by FastAPI.
+- No outbound API client, remote base URL, SDK for a cloud service, SMTP client, webhook client, or message-broker client is present in `careflow/`.
+- `httpx==0.28.1` is installed for FastAPI's `TestClient` in `tests/`; it is not an application integration.
 
 **Clinical/care systems:**
-- No laboratory, screening-program, primary-care, specialist, EHR, scheduling, or patient-notification provider is connected. Those parties are represented as pathway roles and synthetic identifiers in `careflow/pathways/screening_to_care.yaml`, `careflow/engine.py`, and `careflow/seed.py`.
+- No laboratory, screening-program, primary-care, specialist, EHR, scheduling, identity, or patient-notification provider is connected. Those parties are modeled as roles, users, pathway states, and synthetic IDs in `careflow/pathways/screening_to_care.yaml`, `careflow/persistence.py`, and `careflow/seed.py`.
+
+**AI/message provider boundary:**
+- `careflow/ai.py` defines `AIProvider`, deterministic `RuleBasedProvider`, and an optional `LLMProvider` seam. The default provider renders reviewed templates offline for `en`, `hi`, and `bn`; non-English drafts are marked `needs clinical-language review`.
+- `CAREFLOW_MESSAGE_PROVIDER=llm` selects `LLMProvider`, but the normal constructor has no generator and raises `ProviderUnavailableError`; it does not call a network service or consume an API key. Tests can inject a callable through `LLMProvider`.
 
 ## Data Storage
 
 **Databases:**
-- SQLite - the only persistence backend, accessed directly through Python's `sqlite3` module and the synchronous `SQLiteStore` repository in `careflow/persistence.py`.
-  - Connection: a filesystem path passed to `SQLiteStore`/`create_app`; defaults to `careflow.db`, while tests use temporary `careflow.sqlite` files and can use `:memory:` through `careflow/persistence.py`.
-  - Client: standard-library `sqlite3`; no ORM, migration framework, or external database service is configured.
-  - Schema: `users`, `cases`, `consents`, `evidence`, `approvals`, `audit_events`, `notification_outbox`, and `access_logs` are created by the `SCHEMA` constant in `careflow/persistence.py`.
-  - Integrity: foreign keys, uniqueness constraints, indexes, and per-operation transactions are enabled in `careflow/persistence.py`.
+- SQLite - the only persistence backend, accessed with Python's standard-library `sqlite3` through `SQLiteStore` in `careflow/persistence.py`.
+  - Connection: a filesystem path passed to `SQLiteStore`/`create_app`; defaults to `careflow.db`, while tests use temporary files or `:memory:`.
+  - Client: synchronous `sqlite3`; there is no ORM, migration framework, external database service, or connection pool.
+  - Schema: `users`, `cases`, `consents`, `evidence`, `approvals`, `audit_events`, `notification_outbox`, `message_drafts`, and `access_logs` are created by `SCHEMA` in `careflow/persistence.py`.
+  - Integrity: foreign keys, uniqueness/check constraints, indexes, and transaction contexts are enabled by `SQLiteStore`.
 
 **File Storage:**
-- Local filesystem only - SQLite files such as `careflow.db` and pathway configuration at `careflow/pathways/screening_to_care.yaml` are read/written locally; no object storage or document service is integrated.
+- Local filesystem only - SQLite files such as `careflow.db`, pathway YAML, Jinja2 templates, and static CSS are read locally. No object store, document store, or upload service is configured.
 
 **Caching:**
-- None detected. The API creates one in-process `SQLiteStore` connection per `create_app` instance in `careflow/api.py`; there is no Redis, Memcached, or HTTP cache layer.
+- None detected. Each `create_app` instance owns one in-process `SQLiteStore` connection and no Redis, Memcached, HTTP cache, or message broker is used.
 
 ## Authentication & Identity
 
 **Auth Provider:**
-- Custom/local signed-session authentication - `careflow/api.py` constructs an `itsdangerous.URLSafeTimedSerializer` using `CAREFLOW_SESSION_SECRET`/`SESSION_SECRET`, stores session settings on `app.state`, and exposes login, logout, and current-user routes.
-  - Implementation: `POST /auth/login` accepts a seeded user ID, signs a timed `careflow_session` HttpOnly/Lax cookie, and rejects unknown/inactive users. Protected case and operational routes verify the cookie, load the active `User` from SQLite, enforce patient ownership/operational-role rules, and record successful access in `access_logs` in `careflow/api.py` and `careflow/persistence.py`.
-  - Identity source: there is no OAuth/OIDC/SAML provider or password/credential verification. Users are local records created by `careflow/seed.py` or inserted through `SQLiteStore.add_user` in `careflow/persistence.py`; role names are constrained by `USER_ROLES` in `careflow/persistence.py`.
-  - Dependency: `itsdangerous==2.2.0` is declared in `requirements.txt` and pinned in `requirements.lock`.
+- Custom/local signed demo sessions - `careflow/api.py` creates an `itsdangerous.URLSafeTimedSerializer` using `CAREFLOW_SESSION_SECRET` or `SESSION_SECRET`, then exposes JSON and click-through login routes.
+  - Implementation: `POST /auth/login` and `/demo-login/{user_id}` accept an active seeded user ID, issue a timed `careflow_session` cookie with `HttpOnly` and `SameSite=Lax`, and reject unknown/inactive users. Protected routes load the active `User` from SQLite, apply patient/staff and pathway-role checks, and record successful access in `access_logs`.
+  - Identity source: users are local records created by `careflow/seed.py` or `SQLiteStore.add_user`; there is no password proof, OAuth/OIDC/SAML provider, token exchange, or external directory.
+  - Dependency: `itsdangerous==2.2.0` is a direct dependency in `requirements.txt` and `requirements.lock`.
 
 ## Monitoring & Observability
 
 **Error Tracking:**
-- None detected. `careflow/api.py` maps `TransitionError` and selected persistence failures to JSON HTTP responses, but no Sentry, OpenTelemetry, metrics exporter, or hosted error service is configured.
+- None detected. `careflow/api.py` translates expected domain/persistence errors to HTTP responses, but no Sentry, OpenTelemetry, metrics exporter, or hosted error service is configured.
 
 **Logs:**
-- No application logging framework or structured logger is configured. Demo and seed commands print human-readable/JSON output in `careflow/demo.py` and `careflow/seed.py`; Uvicorn provides only its own server logging when started by `Dockerfile` or `README.md`.
-- Domain audit history is persisted in `audit_events`, and successful authenticated-access records can be persisted in `access_logs`, both defined in `careflow/persistence.py`; these are database records rather than a log shipping integration.
+- No application logging framework or structured logger is configured. `careflow/demo.py` and `careflow/seed.py` use `print`; Uvicorn supplies only its own server logs.
+- Workflow audit history is persisted in `audit_events`, successful authenticated access in `access_logs`, and observed metrics are recomputed by `careflow/metrics.py`. These are local records, not log shipping or telemetry integrations.
 
 ## CI/CD & Deployment
 
 **Hosting:**
-- Local process or container only - `README.md` starts Uvicorn directly, and `Dockerfile` builds a `python:3.12-slim` image listening on port 8000. No cloud hosting, managed deployment manifest, or infrastructure provider configuration is present.
+- Local process or container only - `README.md` starts Uvicorn directly, and `Dockerfile` builds `python:3.12-slim`, installs `requirements.lock`, seeds a demo database during build, and listens on port 8000. No provider-specific hosting or infrastructure manifest is present.
 
 **CI Pipeline:**
-- None detected. `Makefile` provides the single local test command (`make test`), while `Dockerfile` provides the build/run path; no GitHub Actions, other CI workflow, registry push, or release pipeline is present.
+- None detected. `Makefile` provides `make test`, `make demo`, and `make seed-demo`; no GitHub Actions, registry workflow, release pipeline, or deployment automation is present.
 
 ## Environment Configuration
 
-**Required env vars:**
-- `CAREFLOW_SESSION_SECRET` or `SESSION_SECRET` - signing secret for the session serializer and `careflow_session` cookie in `careflow/api.py`; a development fallback exists, but deployments should set an explicit secret.
-- `CAREFLOW_SESSION_MAX_AGE` or `SESSION_MAX_AGE` - optional positive session lifetime in seconds; defaults to 3600 in `careflow/api.py`.
-- No database URL, API key, cloud credentials, SMTP settings, webhook URL, or external service token is referenced by application code in `careflow/`.
+**Required/recognized env vars:**
+- `CAREFLOW_SESSION_SECRET` or `SESSION_SECRET` - signing secret for the timed session cookie; if neither is set, `create_app` generates a process-local random secret, so a deployment must provide its own stable secret.
+- `CAREFLOW_SESSION_MAX_AGE` or `SESSION_MAX_AGE` - optional positive session lifetime in seconds, defaulting to `3600` in `careflow/api.py`.
+- `CAREFLOW_MESSAGE_PROVIDER` - optional provider selector, defaulting to offline `rule_based`; `llm` is an unconfigured boundary.
+- No database URL, cloud credential, SMTP setting, webhook URL, or external service token is referenced by application code.
 
 **Secrets location:**
-- Environment variables are the intended location for session configuration in `careflow/api.py`; `.env.example` documents the two supported settings, and `.env` is ignored by `.gitignore`. No deployment secret manager integration is provided.
-- The fallback value `DEFAULT_SESSION_SECRET` is committed in `careflow/api.py` for development and must not be treated as a production secret.
+- Environment variables are the intended location for session settings; `.env.example` exists as a template and `.env` is ignored by `.gitignore`. No deployment secret-manager integration is implemented, and no secret contents were read or added by this scan.
 
 ## Webhooks & Callbacks
 
 **Incoming:**
-- None. The routes in `careflow/api.py` accept ordinary case-management requests; no provider callback or webhook signature endpoint exists.
+- None. `careflow/api.py` has ordinary case-management and message-draft endpoints but no provider callback or webhook-signature route.
 
 **Outgoing:**
-- None. `notification_outbox` in `careflow/persistence.py` queues consent-gated internal notification records and exposes `pending_notifications`/`mark_notification_sent`, but no worker or transport sends them to email, SMS, push, webhook, or a third-party care system.
-- The deterministic seed in `careflow/seed.py` creates synthetic `case_attention` outbox rows for local demos only; it does not call an external notification service.
+- None. `notification_outbox` in `careflow/persistence.py` represents consent-gated queued records. `pending_notifications` and `mark_notification_sent` are repository helpers only; there is no worker or transport for email, SMS, push, webhook, or a care-system API.
+- `careflow/seed.py` creates synthetic `case_attention` rows only after case-scoped consent exists. Message approval atomically changes `message_drafts` and inserts a queued `patient_message`; it does not send a message.
+
+## Current Gaps and Milestone Assumptions
+
+- Managed OIDC/SSO, password-free production identity, session revocation, CSRF protection, and deployment security policy are active requirements in `.planning/PROJECT.md`, not current integrations.
+- Outbox statuses include `queued`, `processing`, `sent`, and `failed`, but no claim/retry worker or external delivery adapter is implemented. Approved drafts therefore remain local queued records.
+- SQLite has no schema version/migrations, backup integration, retention service, or multi-process topology. The current deployment assumption is one local writable file and one process-local store.
 
 ---
 

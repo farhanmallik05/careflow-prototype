@@ -8,27 +8,43 @@
 careflow-prototype/
 ├── careflow/                         # Importable Python application package
 │   ├── __init__.py                   # Package marker; no public logic
-│   ├── api.py                        # FastAPI app factory, models, routes, serialization
+│   ├── api.py                        # FastAPI factory, auth, JSON/HTML routes, serialization
 │   ├── app.py                        # Compatibility re-export of the API app
+│   ├── ai.py                         # Read-only message provider boundary
 │   ├── engine.py                     # Pathway state machine and worklist logic
+│   ├── metrics.py                    # Pure audit-derived operational metrics
 │   ├── persistence.py                # SQLite schema, repository, and operational records
 │   ├── seed.py                       # Deterministic synthetic database fixture command
 │   ├── sim.py                        # Seeded illustrative what-if simulation
 │   ├── demo.py                       # In-memory console walkthrough
-│   └── pathways/
-│       └── screening_to_care.yaml    # Declarative screening-to-care workflow
-├── tests/                            # Pytest tests for domain, API, and persistence
-│   ├── test_engine.py                # State-machine and simulation behavior
-│   ├── test_api.py                   # FastAPI endpoint behavior
+│   ├── pathways/
+│   │   └── screening_to_care.yaml    # Declarative screening-to-care workflow
+│   ├── templates/                    # Jinja2 HTML pages
+│   └── static/style.css              # Dashboard stylesheet
+├── tests/                            # Pytest tests for all runtime boundaries
+│   ├── test_api.py                   # FastAPI JSON route behavior
+│   ├── test_auth.py                  # Signed sessions and authorization
+│   ├── test_docs.py                  # Documentation contract
+│   ├── test_engine.py                # State machine and simulation behavior
+│   ├── test_html.py                  # Jinja2 HTML rendering and isolation
+│   ├── test_messages.py              # Provider, drafts, consent, and outbox
+│   ├── test_metrics.py               # Audit-derived metric semantics
 │   └── test_persistence.py           # SQLite round trips and deterministic seeding
+├── docs/                             # Architecture, safety, and demo guidance
+│   ├── architecture.md
+│   ├── demo-script.md
+│   └── safety.md
 ├── .planning/
+│   ├── PROJECT.md                    # Milestone context and requirements
 │   └── codebase/                     # Generated architecture/structure mapping documents
 ├── .python-version                   # Python runtime pin (3.12)
 ├── requirements.txt                  # Direct dependency pins
 ├── requirements.lock                 # Fully pinned install set
 ├── Dockerfile                        # Reproducible API container build/run
+├── .dockerignore                     # Docker context exclusions
 ├── Makefile                          # Test, demo, and seed command aliases
 ├── README.md                         # Setup, routes, guarantees, and limitations
+├── .env.example                      # Environment-variable template
 ├── .gitignore                        # Local database, virtualenv, cache, and secret exclusions
 └── careflow.db                       # Local SQLite demo artifact; ignored by `.gitignore`
 ```
