@@ -206,7 +206,12 @@ class SQLiteStore:
         self.path = str(path)
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self.connection = sqlite3.connect(self.path)
+        # FastAPI's synchronous TestClient and request handlers may run on a
+        # worker thread different from the one that created the application.
+        # The store still owns one connection and serializes writes with
+        # SQLite transactions, so allowing that connection to cross the
+        # request boundary keeps the existing :memory: fixture useful too.
+        self.connection = sqlite3.connect(self.path, check_same_thread=False)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
         self.initialize()
