@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+
+{% block title %}Metrics · CareFlow{% endblock %}
+
+{% block content %}
+  <div class="page-heading">
+    <div>
+      <p class="eyebrow">Operational view</p>
+      <h1>Metrics</h1>
+      <p class="lede">Current case counts and pathway state distribution.</p>
+    </div>
+    <p class="timestamp">As of <time datetime="{{ as_of }}">{{ as_of }}</time></p>
+  </div>
+
+  <section class="summary-grid" aria-labelledby="operational-title">
+    <h2 id="operational-title" class="sr-only">Operational metrics</h2>
+    <article class="metric-card"><span class="metric-label">Total cases</span><strong>{{ metrics.total_cases }}</strong></article>
+    <article class="metric-card"><span class="metric-label">Open</span><strong>{{ metrics.open_cases }}</strong></article>
+    <article class="metric-card"><span class="metric-label">Closed</span><strong>{{ metrics.closed_cases }}</strong></article>
+    <article class="metric-card"><span class="metric-label">Urgent</span><strong>{{ metrics.urgent }}</strong></article>
+    <article class="metric-card"><span class="metric-label">Overdue</span><strong>{{ metrics.overdue }}</strong></article>
+    <article class="metric-card"><span class="metric-label">Needs attention</span><strong>{{ metrics.attention }}</strong></article>
+  </section>
+
+  <section class="content-section" aria-labelledby="state-title">
+    <div class="section-heading"><div><p class="eyebrow">Current distribution</p><h2 id="state-title">Cases by state</h2></div></div>
+    <div class="table-card table-scroll">
+      <table>
+        <caption class="sr-only">Current operational case counts by pathway state</caption>
+        <thead><tr><th scope="col">State</th><th scope="col">Cases</th></tr></thead>
+        <tbody>
+          {% for state in state_counts %}<tr><th scope="row">{{ state.label }}</th><td>{{ state.count }}</td></tr>{% else %}<tr><td colspan="2">No cases are loaded.</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="content-section simulation-section" aria-labelledby="simulation-title">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">What-if simulation</p>
+        <h2 id="simulation-title">modelled from assumptions, not clinical evidence</h2>
+      </div>
+    </div>
+    <div class="callout warning-callout">
+      <strong>Illustrative only.</strong>
+      <span>This seeded simulation is useful for exploring scenarios; it is not an audit-derived or clinical outcome measure.</span>
+    </div>
+    <div class="table-card table-scroll">
+      <table>
+        <caption class="sr-only">Illustrative scenario simulation</caption>
+        <thead><tr><th scope="col">Scenario</th><th scope="col">Cases</th><th scope="col">Closed</th><th scope="col">Closure rate</th><th scope="col">Unresolved</th></tr></thead>
+        <tbody>
+          {% for scenario in simulation %}
+            <tr><th scope="row">{{ scenario.name }}</th><td>{{ scenario.cases }}</td><td>{{ scenario.closed }}</td><td>{{ scenario.closure_rate }}</td><td>{{ scenario.unresolved }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+{% endblock %}

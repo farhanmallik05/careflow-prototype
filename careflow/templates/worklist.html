@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+
+{% block title %}Worklist · CareFlow{% endblock %}
+
+{% block content %}
+  <div class="page-heading">
+    <div>
+      <p class="eyebrow">Operational queue</p>
+      <h1>Worklist</h1>
+      <p class="lede">Cases that are overdue, need attention, or have no current owner.</p>
+    </div>
+    <p class="timestamp">As of <time datetime="{{ as_of }}">{{ as_of }}</time></p>
+  </div>
+
+  <section class="table-card" aria-labelledby="worklist-title">
+    <h2 id="worklist-title" class="sr-only">Cases requiring attention</h2>
+    {% if rows %}
+      <div class="table-scroll">
+        <table>
+          <caption class="sr-only">Operational worklist with owner, SLA, next action, and evidence needed</caption>
+          <thead>
+            <tr>
+              <th scope="col">Case</th>
+              <th scope="col">State</th>
+              <th scope="col">Owner</th>
+              <th scope="col">Elapsed / SLA</th>
+              <th scope="col">Recommended next action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in rows %}
+              <tr>
+                <th scope="row">
+                  <a href="{{ row.case_url }}">{{ row.case }}</a>
+                  {% if row.urgent %}<span class="badge urgent">Urgent</span>{% endif %}
+                </th>
+                <td>
+                  {{ row.state_label }}
+                  {% if row.overdue %}<span class="badge danger">Overdue</span>{% endif %}
+                  {% if row.attention %}<span class="badge warning">Attention</span>{% endif %}
+                </td>
+                <td>
+                  <strong>{{ row.owner_view.name }}</strong>
+                  {% if row.owner_view.role %}<span class="subtext">{{ row.owner_view.role|replace('_', ' ') }}</span>{% endif %}
+                </td>
+                <td>
+                  <strong>{{ row.elapsed_h }} h</strong> / {{ row.sla_h }} h
+                  <span class="subtext">{{ 'over SLA' if row.overdue else 'within SLA' }}</span>
+                </td>
+                <td>
+                  {% if row.recommended %}
+                    <strong>{{ row.recommended.label }}</strong>
+                    {% if row.recommended.evidence %}
+                      <span class="subtext"><strong>Evidence needed:</strong>
+                        {% for item in row.recommended.evidence %}{{ item.label }}{% if not loop.last %}, {% endif %}{% endfor %}
+                      </span>
+                    {% else %}
+                      <span class="subtext">Evidence needed: none listed</span>
+                    {% endif %}
+                  {% else %}
+                    <span class="subtext">Review case</span>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <div class="empty-state">
+        <h2>No cases require attention</h2>
+        <p>The operational queue is clear at this time.</p>
+      </div>
+    {% endif %}
+  </section>
+{% endblock %}

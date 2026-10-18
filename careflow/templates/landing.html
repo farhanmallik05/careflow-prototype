@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+
+{% block title %}CareFlow demo login{% endblock %}
+
+{% block content %}
+  <section class="hero" aria-labelledby="landing-title">
+    <p class="eyebrow">Pathway operations</p>
+    <h1 id="landing-title">Keep every care journey moving.</h1>
+    <p class="lede">CareFlow makes the next responsible action, evidence, and audit trail visible across a screening-to-care pathway.</p>
+    {% if user %}
+      <div class="callout success" role="status">
+        <strong>You are signed in as {{ user.name }}.</strong>
+        {% if user.role == 'patient' %}
+          <a class="button secondary" href="/patient/{{ user.id }}">View my status</a>
+        {% else %}
+          <a class="button secondary" href="/worklist">Open the worklist</a>
+        {% endif %}
+      </div>
+    {% else %}
+      <div class="callout">
+        <strong>Choose a synthetic demo user to continue.</strong>
+        <span>No password or external account is used for this local prototype.</span>
+      </div>
+    {% endif %}
+  </section>
+
+  <section aria-labelledby="demo-users-title">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">Click-through demo</p>
+        <h2 id="demo-users-title">Sign in as a demo user</h2>
+      </div>
+      <p class="muted">Each link creates the same signed session cookie used by the JSON login endpoint.</p>
+    </div>
+    <div class="card-grid">
+      {% for link in demo_links %}
+        <article class="card demo-card">
+          <p class="eyebrow">{{ link.role }}</p>
+          <h3>{{ link.name }}</h3>
+          <p class="mono">{{ link.id }}</p>
+          <a class="button" href="{{ link.login_url }}">Sign in as {{ link.role }}<span class="sr-only">: {{ link.name }}</span></a>
+        </article>
+      {% else %}
+        <div class="empty-state">
+          <h3>No demo users are seeded</h3>
+          <p>Run <code>make seed-demo</code> before opening the dashboard.</p>
+        </div>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="info-grid" aria-label="Dashboard areas">
+    <article class="card">
+      <h2>Operations</h2>
+      <p>Staff can triage overdue and attention cases with owner, SLA, next action, and evidence context.</p>
+    </article>
+    <article class="card">
+      <h2>Patient status</h2>
+      <p>Patients see plain-language status for their own linked case only.</p>
+    </article>
+    <article class="card">
+      <h2>Auditability</h2>
+      <p>Case reads remain subject to the signed-session authorization and access log already used by the API.</p>
+    </article>
+  </section>
+{% endblock %}

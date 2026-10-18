@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+
+{% block title %}Case {{ case.id }} · CareFlow{% endblock %}
+
+{% block content %}
+  <p class="breadcrumb"><a href="/worklist">← Worklist</a></p>
+  <div class="page-heading">
+    <div>
+      <p class="eyebrow">Case record</p>
+      <h1>{{ case.id }}</h1>
+      <p class="lede">{{ case.state_label }}{% if case.urgent %} · urgent{% endif %}</p>
+    </div>
+    {% if case.closed %}
+      <span class="status-pill success">Closed</span>
+    {% elif case.overdue %}
+      <span class="status-pill danger">Overdue</span>
+    {% else %}
+      <span class="status-pill">Open</span>
+    {% endif %}
+  </div>
+
+  <section class="summary-grid" aria-label="Case summary">
+    <article class="metric-card">
+      <span class="metric-label">Owner</span>
+      <strong>{{ case.owner_view.name }}</strong>
+      {% if case.owner_view.role %}<span class="subtext">{{ case.owner_view.role|replace('_', ' ') }}</span>{% endif %}
+    </article>
+    <article class="metric-card">
+      <span class="metric-label">Patient</span>
+      {% if case.patient_url %}<a href="{{ case.patient_url }}">{{ case.patient_name }}</a>{% else %}<strong>{{ case.patient_name }}</strong>{% endif %}
+      {% if case.patient_id %}<span class="subtext mono">{{ case.patient_id }}</span>{% endif %}
+    </article>
+    <article class="metric-card">
+      <span class="metric-label">Elapsed / SLA</span>
+      {% if case.elapsed_h is not none %}<strong>{{ case.elapsed_h }} h / {{ case.sla_h }} h</strong>{% else %}<strong>Complete</strong>{% endif %}
+      {% if case.overdue %}<span class="subtext danger-text">Over SLA</span>{% endif %}
+    </article>
+    <article class="metric-card">
+      <span class="metric-label">Evidence recorded</span>
+      <strong>{{ case.evidence|length }}</strong>
+      <span class="subtext">items in the case record</span>
+    </article>
+  </section>
+
+  <section class="content-section" aria-labelledby="next-title">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">Decision support</p>
+        <h2 id="next-title">Recommended next action</h2>
+      </div>
+    </div>
+    {% if case.next_actions %}
+      <div class="action-list">
+        {% for action in case.next_actions %}
+          <article class="action-item">
+            <h3>{{ action.label }}</h3>
+            {% if action.evidence %}
+              <p><strong>Evidence needed:</strong>
+                {% for item in action.evidence %}{{ item.label }}{% if not loop.last %}, {% endif %}{% endfor %}
+              </p>
+            {% else %}
+              <p class="muted">Evidence needed: none listed</p>
+            {% endif %}
+          </article>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p class="empty-state">This case has no next action because it is complete.</p>
+    {% endif %}
+  </section>
+
+  <section id="timeline" class="content-section" aria-labelledby="timeline-title">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">Journey history</p>
+        <h2 id="timeline-title">Timeline</h2>
+      </div>
+    </div>
+    <ol class="timeline">
+      {% for event in case.timeline %}
+        <li>
+          <div class="timeline-marker" aria-hidden="true"></div>
+          <div class="timeline-body">
+            <div class="timeline-meta"><time datetime="{{ event.ts_iso }}">{{ event.ts }}</time> · {{ event.actor }}</div>
+            <h3>{{ event.action }}</h3>
+            <p>{{ event.from_state }} → {{ event.to_state }}</p>
+            {% if event.evidence %}<p class="subtext">Evidence: {% for item in event.evidence %}{{ item }}{% if not loop.last %}, {% endif %}{% endfor %}</p>{% endif %}
+            {% if event.approval %}<p class="subtext">Approval: {{ event.approval.note }}</p>{% endif %}
+          </div>
+        </li>
+      {% else %}
+        <li class="empty-state">No timeline events are recorded.</li>
+      {% endfor %}
+    </ol>
+  </section>
+
+  <section id="evidence" class="content-section" aria-labelledby="evidence-title">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">Supporting record</p>
+        <h2 id="evidence-title">Evidence</h2>
+      </div>
+    </div>
+    {% if case.evidence_records %}
+      <div class="table-card table-scroll">
+        <table>
+          <caption class="sr-only">Evidence recorded for {{ case.id }}</caption>
+          <thead><tr><th scope="col">Evidence</th><th scope="col">Recorded at</th><th scope="col">Recorded by</th></tr></thead>
+          <tbody>
+            {% for item in case.evidence_records %}
+              <tr><th scope="row">{{ item.kind_label }}</th><td>{{ item.recorded_at }}</td><td>{{ item.recorded_by }}</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <p class="empty-state">No evidence has been recorded yet.</p>
+    {% endif %}
+  </section>
+
+  <section id="audit" class="content-section" aria-labelledby="audit-title">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">Traceability</p>
+        <h2 id="audit-title">Audit</h2>
+      </div>
+      <p class="muted">Every transition and assignment is retained in order.</p>
+    </div>
+    <div class="table-card table-scroll">
+      <table>
+        <caption class="sr-only">Audit events for {{ case.id }}</caption>
+        <thead><tr><th scope="col">Timestamp</th><th scope="col">Actor</th><th scope="col">Action</th><th scope="col">From</th><th scope="col">To</th><th scope="col">Evidence / approval</th></tr></thead>
+        <tbody>
+          {% for event in case.timeline %}
+            <tr>
+              <td><time datetime="{{ event.ts_iso }}">{{ event.ts }}</time></td>
+              <td>{{ event.actor }}</td>
+              <td>{{ event.action }}</td>
+              <td>{{ event.from_state }}</td>
+              <td>{{ event.to_state }}</td>
+              <td>
+                {% if event.evidence %}Evidence: {% for item in event.evidence %}{{ item }}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}
+                {% if event.approval %}<span class="subtext">Approval: {{ event.approval.note }}</span>{% endif %}
+                {% if not event.evidence and not event.approval %}—{% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+{% endblock %}

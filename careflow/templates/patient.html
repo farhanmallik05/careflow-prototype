@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+
+{% block title %}{{ patient.name }} · CareFlow{% endblock %}
+
+{% block content %}
+  <div class="page-heading">
+    <div>
+      <p class="eyebrow">Patient status</p>
+      <h1>{{ patient.name }}</h1>
+      <p class="lede">A plain-language view of the care journey linked to this patient.</p>
+    </div>
+  </div>
+
+  <section aria-labelledby="status-title">
+    <h2 id="status-title" class="sr-only">Current status</h2>
+    {% if cases %}
+      <div class="patient-cases">
+        {% for case in cases %}
+          <article class="patient-status card">
+            <div class="status-header">
+              <div>
+                <p class="eyebrow">Case {{ case.id }}</p>
+                <h2>{{ case.state_label }}</h2>
+              </div>
+              {% if case.closed %}<span class="status-pill success">Complete</span>{% elif case.urgent %}<span class="status-pill warning">Priority</span>{% else %}<span class="status-pill">In progress</span>{% endif %}
+            </div>
+            <p class="patient-message">{{ case.plain_status }}</p>
+            {% if case.recommended %}
+              <div class="next-step">
+                <span class="metric-label">What happens next</span>
+                <strong>{{ case.recommended.label }}</strong>
+              </div>
+            {% endif %}
+            <p class="subtext">Last updated {{ case.updated_at }}</p>
+            <a class="button secondary" href="{{ case.case_url }}">View my case record<span class="sr-only"> {{ case.id }}</span></a>
+          </article>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="empty-state card">
+        <h2>No linked case yet</h2>
+        <p>There is no care journey linked to this patient in the demo data.</p>
+      </div>
+    {% endif %}
+  </section>
+{% endblock %}

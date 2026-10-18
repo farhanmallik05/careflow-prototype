@@ -15,21 +15,35 @@ import secrets
 import sqlite3
 from pathlib import Path
 from typing import Any, Callable, Mapping
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, BadTimeSignature, URLSafeTimedSerializer
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from careflow.engine import Case, Pathway, TransitionError, explain, worklist
 from careflow.persistence import SQLiteStore, User
+from careflow.sim import compare
 
 
 PATHWAY_FILE = Path(__file__).parent / "pathways" / "screening_to_care.yaml"
+TEMPLATES_DIR = Path(__file__).parent / "templates"
+STATIC_DIR = Path(__file__).parent / "static"
 Clock = Callable[[], datetime]
 SESSION_COOKIE = "careflow_session"
 SESSION_SALT = "careflow-session"
 DEFAULT_SESSION_MAX_AGE = 3600
+
+
+_template_environment = Environment(
+    loader=FileSystemLoader(TEMPLATES_DIR),
+    autoescape=select_autoescape(("html", "xml"), default_for_string=True),
+)
+templates = Jinja2Templates(env=_template_environment)
 
 
 def _default_clock() -> datetime:
@@ -188,6 +202,203 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
+def _request_wants_html(request: Request) -> bool:
+    """Choose HTML only when the caller explicitly prefers it.
+
+    ``TestClient`` and most API clients send ``*/*`` or ``application/json``;
+    those requests continue through the existing JSON response path.  Browsers
+    send an explicit ``text/html`` preference, which opts them into templates.
+    """
+
+    accept = request.headers.get("accept", "").strip().lower()
+    if not accept or accept == "*/*":
+        return False
+
+    explicit: dict[str, float] = {}
+    wildcard = 0.0
+    for item in accept.split(","):
+        parts = [part.strip() for part in item.split(";")]
+        media_type = parts[0]
+        quality = 1.0
+        for parameter in parts[1:]:
+            name, _, value = parameter.partition("=")
+            if name.strip() == "q":
+                try:
+                    quality = max(0.0, float(value))
+                except ValueError:
+                    quality = 0.0
+        if media_type == "*/*":
+            wildcard = quality
+        elif media_type in {"text/html", "application/json"}:
+            explicit[media_type] = quality
+
+    html_quality = explicit.get("text/html", wildcard)
+    json_quality = explicit.get("application/json", wildcard)
+    return html_quality > 0 and html_quality >= json_quality
+
+
+def _label(value: Any) -> str:
+    """Turn internal snake-case values into readable labels for the UI."""
+
+    if value is None or value == "":
+        return "—"
+    return str(value).replace("_", " ").strip().title()
+
+
+def _format_datetime(value: Any) -> str:
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M")
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value).strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            return value
+    return str(value)
+
+
+def _datetime_attr(value: Any) -> str:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def _owner_view(store: SQLiteStore, owner_id: str | None) -> dict[str, str]:
+    owner = store.get_user(owner_id) if owner_id else None
+    if owner is None:
+        return {
+            "id": owner_id or "",
+            "name": owner_id or "Unassigned",
+            "role": "",
+            "label": owner_id or "Unassigned",
+        }
+    return {
+        "id": owner.id,
+        "name": owner.name,
+        "role": owner.role,
+        "label": f"{owner.name} ({_label(owner.role)})",
+    }
+
+
+def _next_action_views(next_actions: Mapping[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": action,
+            "label": _label(action),
+            "evidence": [
+                {"id": evidence, "label": _label(evidence)}
+                for evidence in (required or [])
+            ],
+        }
+        for action, required in next_actions.items()
+    ]
+
+
+def _worklist_view_rows(store: SQLiteStore, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result = []
+    for row in rows:
+        next_actions = _next_action_views(row.get("next", {}))
+        result.append(
+            {
+                **row,
+                "state_label": _label(row.get("state")),
+                "owner_view": _owner_view(store, row.get("owner")),
+                "next_actions": next_actions,
+                "recommended": next_actions[0] if next_actions else None,
+                "case_url": f"/cases/{quote(str(row['case']), safe='')}",
+            }
+        )
+    return result
+
+
+def _patient_status(state: str, closed: bool) -> str:
+    if closed:
+        return "Your care journey is complete, and the closure has been recorded."
+    return {
+        "result_issued": "Your screening result is ready and the care team is preparing the next step.",
+        "patient_notified": "Your care team has sent a notification and is waiting for your acknowledgement.",
+        "patient_acknowledged": "Your acknowledgement is recorded and a primary care review is next.",
+        "referral_created": "Your referral is being reviewed by the care coordination team.",
+        "referral_rejected": "Your referral needs another review before care can continue.",
+        "referral_accepted": "Your referral was accepted and a specialist appointment is next.",
+        "appointment_booked": "An appointment is booked and the team is waiting for the visit.",
+        "care_received": "Your visit is recorded and the care team is preparing closure.",
+        "escalated": "A care team member is reviewing the next step with priority.",
+    }.get(state, "Your care team is reviewing the next step.")
+
+
+def _case_view_context(store: SQLiteStore, payload: dict[str, Any], case: Case) -> dict[str, Any]:
+    record = store.get_case_record(case.id) or {}
+    patient = store.get_user(record.get("patient_user_id")) if record.get("patient_user_id") else None
+    timeline = []
+    for event in case.audit:
+        approval = event.get("approval")
+        timeline.append(
+            {
+                "ts": _format_datetime(event.get("ts")),
+                "ts_iso": _datetime_attr(event.get("ts")),
+                "actor": event.get("actor", "—"),
+                "action": _label(event.get("action")),
+                "from_state": _label(event.get("from")),
+                "to_state": _label(event.get("to")),
+                "evidence": [_label(item) for item in event.get("evidence", [])],
+                "approval": approval if isinstance(approval, Mapping) else None,
+                "owner": event.get("owner"),
+            }
+        )
+
+    evidence = [
+        {
+            "id": item.id,
+            "kind": item.kind,
+            "kind_label": _label(item.kind),
+            "recorded_at": _format_datetime(item.recorded_at),
+            "recorded_by": item.recorded_by or "—",
+        }
+        for item in store.list_evidence(case.id)
+    ]
+    next_actions = _next_action_views(payload.get("next", {}))
+    return {
+        **payload,
+        "state_label": _label(payload.get("state")),
+        "owner_view": _owner_view(store, payload.get("owner")),
+        "patient_name": patient.name if patient else "Not linked",
+        "patient_id": patient.id if patient else None,
+        "patient_url": f"/patient/{quote(patient.id, safe='')}" if patient else None,
+        "next_actions": next_actions,
+        "timeline": timeline,
+        "evidence_records": evidence,
+        "case_url": f"/cases/{quote(case.id, safe='')}",
+    }
+
+
+def _patient_case_view(payload: dict[str, Any]) -> dict[str, Any]:
+    next_actions = _next_action_views(payload.get("next", {}))
+    recommended = next_actions[0] if next_actions else None
+    return {
+        "id": payload["id"],
+        "case_url": f"/cases/{quote(payload['id'], safe='')}",
+        "state_label": _label(payload.get("state")),
+        "plain_status": _patient_status(payload.get("state", ""), bool(payload.get("closed"))),
+        "updated_at": _format_datetime(payload.get("updated_at")),
+        "urgent": bool(payload.get("urgent")),
+        "closed": bool(payload.get("closed")),
+        "recommended": recommended,
+    }
+
+
+def _simulation_view(simulation: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": "Baseline" if name == "baseline" else _label(name),
+            "cases": values["cases"],
+            "closed": values["closed"],
+            "closure_rate": values["closure_rate"],
+            "unresolved": values["unresolved"],
+        }
+        for name, values in simulation.items()
+    ]
+
+
 def _user_payload(user: User) -> dict[str, Any]:
     """Return a stable user shape for login and current-user clients."""
 
@@ -299,6 +510,7 @@ def create_app(
     app.state.session_secret = resolved_session_secret
     app.state.session_max_age = resolved_session_max_age
     app.state.session_cookie = SESSION_COOKIE
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     @app.exception_handler(TransitionError)
     async def transition_error_handler(_: Any, exc: TransitionError) -> JSONResponse:
@@ -307,6 +519,22 @@ def create_app(
         return JSONResponse(
             status_code=status_code,
             content={"error": "transition_error", "detail": message},
+        )
+
+    @app.exception_handler(HTTPException)
+    async def http_exception_handler(request: Request, exc: HTTPException) -> Response:
+        if _request_wants_html(request):
+            return templates.TemplateResponse(
+                request=request,
+                name="error.html",
+                context={"status_code": exc.status_code, "detail": str(exc.detail)},
+                status_code=exc.status_code,
+                headers=exc.headers,
+            )
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+            headers=exc.headers,
         )
 
     def now() -> datetime:
@@ -392,12 +620,7 @@ def create_app(
         payload = _user_payload(user)
         return {"user": payload, **payload}
 
-    @app.post("/auth/login", status_code=200)
-    @app.post("/login", status_code=200, include_in_schema=False)
-    def login(request: LoginInput, response: Response) -> dict[str, Any]:
-        user = store.get_user(request.identifier)
-        if user is None or not user.is_active:
-            raise HTTPException(status_code=401, detail="unknown or inactive user")
+    def set_session_cookie(response: Response, user: User) -> None:
         token = signer.dumps({"user_id": user.id})
         response.set_cookie(
             SESSION_COOKIE,
@@ -407,6 +630,60 @@ def create_app(
             samesite="lax",
             path="/",
         )
+
+    def landing_context(request: Request) -> dict[str, Any]:
+        try:
+            user = authenticated_user(request)
+        except HTTPException:
+            user = None
+        demo_links = []
+        for demo_user in store.list_users(active_only=True):
+            if not demo_user.id.startswith("demo-"):
+                continue
+            target = (
+                f"/patient/{quote(demo_user.id, safe='')}"
+                if demo_user.role == "patient"
+                else "/worklist"
+            )
+            demo_links.append(
+                {
+                    "id": demo_user.id,
+                    "name": demo_user.name,
+                    "role": _label(demo_user.role),
+                    "login_url": f"/demo-login/{quote(demo_user.id, safe='')}",
+                    "target": target,
+                }
+            )
+        return {"user": user, "demo_links": demo_links}
+
+    @app.get("/", status_code=200, include_in_schema=False)
+    @app.get("/login", status_code=200, include_in_schema=False)
+    def landing(request: Request) -> Response:
+        return templates.TemplateResponse(
+            request=request,
+            name="landing.html",
+            context=landing_context(request),
+        )
+
+    @app.get("/demo-login/{user_id}", status_code=303, include_in_schema=False)
+    def demo_login(user_id: str) -> Response:
+        if not user_id.startswith("demo-"):
+            raise HTTPException(status_code=404, detail="demo user not found")
+        user = store.get_user(user_id)
+        if user is None or not user.is_active:
+            raise HTTPException(status_code=404, detail="demo user not found")
+        target = f"/patient/{quote(user.id, safe='')}" if user.role == "patient" else "/worklist"
+        response = RedirectResponse(url=target, status_code=303)
+        set_session_cookie(response, user)
+        return response
+
+    @app.post("/auth/login", status_code=200)
+    @app.post("/login", status_code=200, include_in_schema=False)
+    def login(request: LoginInput, response: Response) -> dict[str, Any]:
+        user = store.get_user(request.identifier)
+        if user is None or not user.is_active:
+            raise HTTPException(status_code=401, detail="unknown or inactive user")
+        set_session_cookie(response, user)
         return user_response(user)
 
     @app.post("/auth/logout", status_code=200)
@@ -511,7 +788,47 @@ def create_app(
         authorize_case_access(user, case_id)
         payload = _case_payload(store, case, now())
         log_case_access(user, case.id, "read", f"/cases/{case_id}")
+        if _request_wants_html(http_request):
+            return templates.TemplateResponse(
+                request=http_request,
+                name="case.html",
+                context={
+                    "user": user,
+                    "case": _case_view_context(store, payload, case),
+                },
+            )
         return payload
+
+    @app.get("/patient/{patient_id}", status_code=200)
+    def get_patient(patient_id: str, http_request: Request) -> dict[str, Any]:
+        user = authenticated_user(http_request)
+        patient = store.get_user(patient_id)
+        if patient is None or not patient.is_active or patient.role != "patient":
+            raise HTTPException(status_code=404, detail=f"patient not found: {patient_id}")
+        if user.role == "patient" and user.id != patient.id:
+            raise HTTPException(status_code=403, detail="patients may access only their own patient status")
+
+        timestamp = now()
+        records = [
+            record for record in store.list_case_records() if record.get("patient_user_id") == patient.id
+        ]
+        case_payloads = []
+        patient_cases = []
+        for record in records:
+            case = _load_case(store, resolved_pathway, record["id"])
+            payload = _case_payload(store, case, timestamp)
+            case_payloads.append(payload)
+            patient_cases.append(_patient_case_view(payload))
+            log_case_access(user, case.id, "read", f"/patient/{patient_id}")
+
+        result = {"patient": _user_payload(patient), "cases": case_payloads}
+        if _request_wants_html(http_request):
+            return templates.TemplateResponse(
+                request=http_request,
+                name="patient.html",
+                context={"user": user, "patient": patient, "cases": patient_cases},
+            )
+        return result
 
     @app.get("/worklist", status_code=200)
     def get_worklist(http_request: Request) -> list[dict[str, Any]]:
@@ -523,6 +840,16 @@ def create_app(
         rows = _jsonable(worklist(cases, timestamp))
         for record in records:
             log_case_access(user, record["id"], "worklist", "/worklist")
+        if _request_wants_html(http_request):
+            return templates.TemplateResponse(
+                request=http_request,
+                name="worklist.html",
+                context={
+                    "user": user,
+                    "rows": _worklist_view_rows(store, rows),
+                    "as_of": _format_datetime(timestamp),
+                },
+            )
         return rows
 
     @app.get("/metrics", status_code=200)
@@ -558,6 +885,21 @@ def create_app(
         }
         for record in records:
             log_case_access(user, record["id"], "metrics", "/metrics")
+        if _request_wants_html(http_request):
+            return templates.TemplateResponse(
+                request=http_request,
+                name="metrics.html",
+                context={
+                    "user": user,
+                    "metrics": result,
+                    "state_counts": [
+                        {"label": _label(state), "count": count}
+                        for state, count in result["by_state"].items()
+                    ],
+                    "simulation": _simulation_view(compare()),
+                    "as_of": _format_datetime(timestamp),
+                },
+            )
         return result
 
     return app

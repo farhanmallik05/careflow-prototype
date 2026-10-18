@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+
+{% block title %}{{ status_code }} · CareFlow{% endblock %}
+
+{% block content %}
+  <section class="error-page" aria-labelledby="error-title">
+    <p class="eyebrow">Request could not be completed</p>
+    <h1 id="error-title">{{ status_code }}</h1>
+    <p class="lede">{{ detail }}</p>
+    <a class="button" href="/login">Return to demo login</a>
+  </section>
+{% endblock %}

@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="CareFlow pathway operations dashboard">
+    <title>{% block title %}CareFlow{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    <header class="site-header">
+      <div class="header-inner">
+        <a class="brand" href="/">CareFlow <span>operations</span></a>
+        <nav aria-label="Primary navigation">
+          {% if user %}
+            {% if user.role != 'patient' %}
+              <a href="/worklist">Worklist</a>
+              <a href="/metrics">Metrics</a>
+            {% else %}
+              <a href="/patient/{{ user.id }}">My status</a>
+            {% endif %}
+            <span class="user-chip" aria-label="Signed in user">{{ user.name }} · {{ user.role|replace('_', ' ') }}</span>
+          {% else %}
+            <a href="/login">Demo login</a>
+          {% endif %}
+        </nav>
+      </div>
+    </header>
+    <main id="main-content" class="page-shell">
+      {% block content %}{% endblock %}
+    </main>
+    <footer class="site-footer">
+      CareFlow prototype · synthetic operational data only
+    </footer>
+  </body>
+</html>
