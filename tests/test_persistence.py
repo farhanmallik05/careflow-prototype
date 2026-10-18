@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta
 
+import pytest
+
 from careflow.engine import Case, Pathway
 from careflow.persistence import Consent, SQLiteStore, User
 from careflow.seed import DEMO_NOW, seed_demo
@@ -64,6 +66,17 @@ def test_approval_and_notification_outbox_are_persisted(tmp_path):
         assert len(approvals) == 1
         assert approvals[0].role == "care_coordinator"
         assert approvals[0].note == "Reviewed"
+        store.add_consent(
+            Consent(
+                id="consent-1",
+                user_id="patient-1",
+                case_id="CASE-1",
+                consent_type="care_coordination",
+                status="granted",
+                granted_at=T0,
+                source="test",
+            )
+        )
 
         notification_id = store.enqueue_notification(
             event="case_closed",
@@ -80,6 +93,35 @@ def test_approval_and_notification_outbox_are_persisted(tmp_path):
         assert store.pending_notifications(now=T0 + timedelta(hours=2)) == []
         assert store.list_outbox()[0]["status"] == "sent"
         assert store.list_outbox()[0]["payload"] == {"synthetic": True}
+
+
+def test_case_notification_requires_granted_unexpired_consent(tmp_path):
+    with SQLiteStore(tmp_path / "careflow.sqlite") as store:
+        store.add_user(User("patient-1", "Synthetic Patient", "patient", created_at=T0))
+        case = Case("CASE-1", PW, T0)
+        store.save_case(case, patient_user_id="patient-1")
+
+        with pytest.raises(ValueError, match="consent"):
+            store.enqueue_notification(event="case_attention", case_id="CASE-1", created_at=T0)
+
+        store.add_consent(
+            Consent(
+                id="consent-expired",
+                user_id="patient-1",
+                case_id="CASE-1",
+                consent_type="care_coordination",
+                status="granted",
+                granted_at=T0,
+                expires_at=T0 + timedelta(hours=1),
+                source="test",
+            )
+        )
+        with pytest.raises(ValueError, match="consent"):
+            store.enqueue_notification(
+                event="case_attention",
+                case_id="CASE-1",
+                created_at=T0 + timedelta(hours=2),
+            )
 
 
 def test_seed_is_deterministic_and_covers_pathway_stages(tmp_path):

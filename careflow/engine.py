@@ -28,11 +28,11 @@ class Pathway:
                     raise ValueError(f"{s}.{a}: unknown target {t['to']}")
 
 class Case:
-    def __init__(self, cid, pathway, now, urgent=False):
+    def __init__(self, cid, pathway, now, urgent=False, *, owner=None, actor="system"):
         self.id, self.pw, self.urgent = cid, pathway, urgent
         self.state, self.entered, self.audit, self.evidence = pathway.start, now, [], set()
-        self.owner = pathway.states[self.state]["owner"]
-        self._log(now, "system", "open", None, self.state)
+        self.owner = pathway.states[self.state]["owner"] if owner is None else owner
+        self._log(now, actor, "open", None, self.state)
 
     def _log(self, ts, actor, action, frm, to, **kw):
         self.audit.append({"ts": ts, "actor": actor, "action": action, "from": frm, "to": to, **kw})
@@ -49,7 +49,7 @@ class Case:
         self._log(now, actor, "assign", self.state, self.state, owner=person)
         self.owner = person
 
-    def transition(self, action, actor, now, evidence=(), approval=None):
+    def transition(self, action, actor, now, evidence=(), approval=None, *, actor_role=None, next_owner=None):
         """Move the case. Missing evidence is only waived by a documented approval
         from an authorized human role. AI components never call this with approval."""
         if self.closed:
@@ -57,13 +57,23 @@ class Case:
         t = self.pw.states[self.state]["next"].get(action)
         if t is None:
             raise TransitionError(f"'{action}' is not allowed from {self.state}")
+        if actor_role is not None:
+            owner_role = self.pw.states[self.state]["owner"]
+            approval_role = approval.get("role") if isinstance(approval, dict) else None
+            if approval is not None and approval_role != actor_role:
+                raise TransitionError("documented approval must match the authenticated user's role")
+            if actor_role != owner_role:
+                if actor_role not in self.pw.approvers:
+                    raise TransitionError(f"role '{actor_role}' cannot transition from {self.state}")
+                if not approval or approval_role != actor_role or not approval.get("note"):
+                    raise TransitionError("an authorized approver must submit a matching documented approval")
         have = self.evidence | set(evidence)
         missing = [e for e in t.get("requires", []) if e not in have]
         if missing and not (approval and approval.get("role") in self.pw.approvers and approval.get("note")):
             raise TransitionError(f"missing evidence {missing}: provide it or a documented authorized approval")
         frm, self.evidence = self.state, have
         self.state, self.entered = t["to"], now
-        self.owner = None if self.closed else self.pw.states[self.state]["owner"]
+        self.owner = None if self.closed else (next_owner if next_owner is not None else self.pw.states[self.state]["owner"])
         self._log(now, actor, action, frm, self.state, evidence=sorted(evidence), approval=approval)
 
 def hours(a, b):

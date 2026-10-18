@@ -23,6 +23,7 @@ STAFF = (
     ("demo-specialist", "Demo Specialist", "specialist"),
     ("demo-on-call", "Demo Clinician on Call", "clinician_on_call"),
 )
+STAFF_BY_ROLE = {role: user_id for user_id, _, role in STAFF}
 
 ROUTES: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] = {
     "result_issued": (),
@@ -92,12 +93,21 @@ def _make_case(index: int, pathway: Pathway, now: datetime) -> Case:
     delay = _current_delay(stage, index, pathway)
     journey_hours = sum(STEP_HOURS[: len(route)])
     started = now - timedelta(hours=delay + journey_hours)
-    case = Case(case_id, pathway, started, urgent=index % 5 == 0)
+    case = Case(
+        case_id,
+        pathway,
+        started,
+        urgent=index % 5 == 0,
+        owner=STAFF_BY_ROLE[pathway.states[pathway.start]["owner"]],
+        actor="demo-seed",
+    )
 
     elapsed = 0
     for step, (action, evidence) in enumerate(route):
         elapsed += STEP_HOURS[step]
         timestamp = started + timedelta(hours=elapsed)
+        next_state = pathway.states[case.state]["next"][action]["to"]
+        next_owner = None if next_state in pathway.terminal else STAFF_BY_ROLE[pathway.states[next_state]["owner"]]
         if action == "close" and ((index - 1) // len(STAGES)) % 2 == 0:
             case.transition(
                 action,
@@ -108,9 +118,10 @@ def _make_case(index: int, pathway: Pathway, now: datetime) -> Case:
                     "name": "Demo Care Coordinator",
                     "note": "Synthetic closure review recorded for demo data",
                 },
+                next_owner=next_owner,
             )
         else:
-            case.transition(action, "demo-seed", timestamp, evidence=evidence)
+            case.transition(action, "demo-seed", timestamp, evidence=evidence, next_owner=next_owner)
     return case
 
 

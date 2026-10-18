@@ -105,11 +105,36 @@ CREATE TABLE IF NOT EXISTS notification_outbox (
     dedupe_key TEXT UNIQUE
 );
 
+CREATE TABLE IF NOT EXISTS access_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    case_id TEXT NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+    action TEXT NOT NULL CHECK (action IN ('read', 'mutation', 'worklist', 'metrics')),
+    endpoint TEXT,
+    occurred_at TEXT NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}'
+);
+
 CREATE INDEX IF NOT EXISTS idx_cases_state ON cases(state);
 CREATE INDEX IF NOT EXISTS idx_cases_owner ON cases(owner);
 CREATE INDEX IF NOT EXISTS idx_audit_case ON audit_events(case_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_outbox_ready ON notification_outbox(status, available_at);
+CREATE INDEX IF NOT EXISTS idx_access_case ON access_logs(case_id, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_access_user ON access_logs(user_id, occurred_at);
 """
+
+USER_ROLES = frozenset(
+    {
+        "lab",
+        "screening_program",
+        "primary_care",
+        "specialist",
+        "care_coordinator",
+        "clinician_on_call",
+        "patient",
+    }
+)
+ROLES = USER_ROLES
 
 
 @dataclass(frozen=True)
@@ -122,6 +147,10 @@ class User:
     email: str | None = None
     is_active: bool = True
     created_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if self.role not in USER_ROLES:
+            raise ValueError(f"unknown user role: {self.role}")
 
 
 @dataclass(frozen=True)
@@ -159,12 +188,33 @@ class ApprovalRecord:
     recorded_at: datetime | None = None
 
 
+@dataclass(frozen=True)
+class AccessLog:
+    """A successful authenticated access to a case or case collection."""
+
+    id: int
+    user_id: str
+    case_id: str
+    action: str
+    occurred_at: datetime
+    endpoint: str | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
 def _datetime(value: datetime | str | None) -> datetime:
     if isinstance(value, datetime):
         return value
     if isinstance(value, str):
         return datetime.fromisoformat(value)
     raise TypeError("a datetime or ISO datetime string is required")
+
+
+def _instant(value: datetime) -> datetime:
+    """Normalize naive and timezone-aware timestamps for safe comparisons."""
+
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _iso(value: datetime | str | None) -> str:
@@ -200,6 +250,7 @@ class SQLiteStore:
         "approvals",
         "audit_events",
         "notification_outbox",
+        "access_logs",
     }
 
     def __init__(self, path: str | Path = "careflow.db") -> None:
@@ -236,6 +287,7 @@ class SQLiteStore:
 
         with self.connection:
             for table in (
+                "access_logs",
                 "notification_outbox",
                 "audit_events",
                 "approvals",
@@ -281,8 +333,18 @@ class SQLiteStore:
             created_at=_datetime(row["created_at"]),
         )
 
-    def list_users(self) -> list[User]:
-        rows = self.connection.execute("SELECT * FROM users ORDER BY id").fetchall()
+    def list_users(self, *, role: str | None = None, active_only: bool = False) -> list[User]:
+        query, args = "SELECT * FROM users", []
+        clauses = []
+        if role is not None:
+            clauses.append("role = ?")
+            args.append(role)
+        if active_only:
+            clauses.append("is_active = 1")
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY id"
+        rows = self.connection.execute(query, args).fetchall()
         return [
             User(
                 id=row["id"],
@@ -640,6 +702,100 @@ class SQLiteStore:
         rows = self.connection.execute("SELECT * FROM cases ORDER BY id").fetchall()
         return [dict(row) for row in rows]
 
+    def has_valid_consent(
+        self,
+        case_id: str,
+        *,
+        user_id: str | None = None,
+        now: datetime | str | None = None,
+    ) -> bool:
+        """Return whether the case's user has a currently granted consent.
+
+        Case notifications are authorized by the patient consent attached to the
+        case.  A caller may provide ``user_id`` for repositories that need to
+        check another explicitly scoped case user; the default is the case's
+        ``patient_user_id``.
+        """
+
+        record = self.get_case_record(case_id)
+        if record is None:
+            return False
+        consent_user_id = user_id or record.get("patient_user_id")
+        if not consent_user_id:
+            return False
+        check_at = _datetime(now) if now is not None else datetime.now(timezone.utc)
+        for consent in self.list_consents(user_id=consent_user_id, case_id=case_id):
+            if consent.status != "granted":
+                continue
+            if _instant(consent.granted_at) > _instant(check_at):
+                continue
+            if consent.expires_at is not None and _instant(consent.expires_at) <= _instant(check_at):
+                continue
+            return True
+        return False
+
+    def record_access(
+        self,
+        *,
+        user_id: str,
+        case_id: str,
+        action: str,
+        occurred_at: datetime | str | None = None,
+        endpoint: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> int:
+        """Record a successful authenticated case access."""
+
+        if action not in {"read", "mutation", "worklist", "metrics"}:
+            raise ValueError("unknown access-log action")
+        occurred_at = occurred_at or datetime.now(timezone.utc)
+        with self.connection:
+            cursor = self.connection.execute(
+                """
+                INSERT INTO access_logs
+                    (user_id, case_id, action, endpoint, occurred_at, metadata_json)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (user_id, case_id, action, endpoint, _iso(occurred_at), _json(metadata or {})),
+            )
+        assert cursor.lastrowid is not None
+        return int(cursor.lastrowid)
+
+    def list_access_logs(
+        self,
+        *,
+        user_id: str | None = None,
+        case_id: str | None = None,
+        action: str | None = None,
+    ) -> list[AccessLog]:
+        query, args = "SELECT * FROM access_logs", []
+        clauses = []
+        if user_id is not None:
+            clauses.append("user_id = ?")
+            args.append(user_id)
+        if case_id is not None:
+            clauses.append("case_id = ?")
+            args.append(case_id)
+        if action is not None:
+            clauses.append("action = ?")
+            args.append(action)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY id"
+        rows = self.connection.execute(query, args).fetchall()
+        return [
+            AccessLog(
+                id=int(row["id"]),
+                user_id=row["user_id"],
+                case_id=row["case_id"],
+                action=row["action"],
+                endpoint=row["endpoint"],
+                occurred_at=_datetime(row["occurred_at"]),
+                metadata=_from_json(row["metadata_json"], {}),
+            )
+            for row in rows
+        ]
+
     def enqueue_notification(
         self,
         *,
@@ -652,9 +808,16 @@ class SQLiteStore:
         available_at: datetime | str | None = None,
         created_at: datetime | str | None = None,
         dedupe_key: str | None = None,
+        consent_user_id: str | None = None,
     ) -> str:
         now = _datetime(created_at) if created_at is not None else datetime.now(timezone.utc)
         available_at = available_at or now
+        if case_id is not None and not self.has_valid_consent(
+            case_id,
+            user_id=consent_user_id,
+            now=now,
+        ):
+            raise ValueError("case notification requires a granted, unexpired case/user consent")
         notification_id = notification_id or f"notification:{event}:{case_id or 'global'}:{_iso(now)}"
         with self.connection:
             self.connection.execute(
