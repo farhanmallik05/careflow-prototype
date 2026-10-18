@@ -18,6 +18,8 @@ Start the API and server-rendered dashboard with `python -m uvicorn careflow.api
 
 The supported roles are `lab`, `screening_program`, `primary_care`, `specialist`, `care_coordinator`, `clinician_on_call`, and `patient`. Every transition uses the authenticated user id in the engine audit. A transition is allowed only for the current state's role owner or for a pathway approver (`clinician_on_call` or `care_coordinator`) who submits a matching documented approval. Assignments require an active user whose role owns the current state, and open cases always retain exactly one owner. Patients can read and mutate only their own case; operational worklists and metrics are staff-only. Successful case reads, mutations, worklist accesses, and metrics accesses are recorded in `access_logs`. Case notifications require a granted, unexpired case consent.
 
+Patient message drafts use the deterministic offline `RuleBasedProvider` by default. Staff can create a draft with `POST /cases/{case_id}/message-drafts`, list drafts with `GET /cases/{case_id}/message-drafts`, and approve one with `POST /message-drafts/{draft_id}/approve`; approval requires the current case owner or a pathway approver plus a granted, unexpired case consent. Approval only queues a `patient_message` row in the existing notification outbox; no notification is sent. English drafts are ready for review, while Hindi and Bengali drafts expose the exact `needs clinical-language review` flag. Set `CAREFLOW_MESSAGE_PROVIDER=llm` only to select the optional, unconfigured LLM boundary; the default and tests remain offline.
+
 For a clean container build and run:
 
 ```bash
@@ -32,15 +34,15 @@ The image seeds the deterministic demo database during the build, so the signed-
 Build the image in the target container registry, then run it with a deployment-only session secret supplied by the platform's secret manager:
 
 ```bash
-docker build -t registry.example/careflow:step-4 .
-docker push registry.example/careflow:step-4
+docker build -t registry.example/careflow:step-5 .
+docker push registry.example/careflow:step-5
 docker run -d --name careflow --restart unless-stopped -p 8000:8000 \
   -e CAREFLOW_SESSION_SECRET="$CAREFLOW_SESSION_SECRET" \
-  registry.example/careflow:step-4
+  registry.example/careflow:step-5
 ```
 
-Replace `registry.example/careflow:step-4` with the target registry/image name; do not commit the session secret.
+Replace `registry.example/careflow:step-5` with the target registry/image name; do not commit the session secret.
 
 Guarantees (each tested): no closure without required evidence or a documented authorized human approval; every open case has an owner; overdue, rejected and escalated cases surface in the worklist (urgent first); every transition is audited; invalid transitions are rejected.
 
-Limits: synthetic data only; patient message drafting is not implemented. The metrics page keeps audit-derived operational counts as-is and includes the existing illustrative simulation labelled “modelled from assumptions, not clinical evidence”; the step-6 metrics redesign is not implemented.
+Limits: synthetic data only; message delivery is not implemented and approved drafts remain queued in the local outbox. The metrics page keeps audit-derived operational counts as-is and includes the existing illustrative simulation labelled “modelled from assumptions, not clinical evidence”; the step-6 metrics redesign is not implemented.

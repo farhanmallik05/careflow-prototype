@@ -25,8 +25,19 @@ from itsdangerous import BadSignature, BadTimeSignature, URLSafeTimedSerializer
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from careflow.ai import (
+    AIProvider,
+    DEFAULT_TEMPLATE,
+    ProviderError,
+    ProviderUnavailableError,
+    REVIEW_FLAG,
+    SUPPORTED_TEMPLATES,
+    create_message_provider,
+    normalize_language,
+    normalize_template,
+)
 from careflow.engine import Case, Pathway, TransitionError, explain, worklist
-from careflow.persistence import SQLiteStore, User
+from careflow.persistence import MessageDraftRecord, SQLiteStore, User
 from careflow.sim import compare
 
 
@@ -186,6 +197,37 @@ class AssignInput(BaseModel):
         target = self.person or self.owner or self.assignee
         assert target is not None
         return target.strip()
+
+
+class MessageDraftInput(BaseModel):
+    """Input for deterministic or configured patient-message drafting."""
+
+    language: str = "en"
+    template: str = DEFAULT_TEMPLATE
+
+    @field_validator("language")
+    @classmethod
+    def supported_language(cls, value: str) -> str:
+        return normalize_language(_required_text(value, "language"))
+
+    @field_validator("template")
+    @classmethod
+    def supported_template(cls, value: str) -> str:
+        normalized = normalize_template(_required_text(value, "template"))
+        if normalized not in SUPPORTED_TEMPLATES:  # pragma: no cover - defensive
+            raise ValueError("unsupported message template")
+        return normalized
+
+
+class MessageApprovalInput(BaseModel):
+    """Optional note recorded alongside a human draft approval."""
+
+    note: str = "Message draft reviewed and approved by authenticated staff"
+
+    @field_validator("note")
+    @classmethod
+    def non_blank_note(cls, value: str) -> str:
+        return _required_text(value, "note")
 
 
 def _jsonable(value: Any) -> Any:
@@ -412,6 +454,31 @@ def _user_payload(user: User) -> dict[str, Any]:
     }
 
 
+def _message_draft_payload(draft: MessageDraftRecord) -> dict[str, Any]:
+    """Expose normalized draft status and its human-readable equivalent."""
+
+    return {
+        "id": draft.id,
+        "draft_id": draft.id,
+        "case_id": draft.case_id,
+        "patient_user_id": draft.patient_user_id,
+        "language": draft.language,
+        "template": draft.template,
+        "message": draft.message,
+        "provider": draft.provider,
+        "review_required": draft.review_required,
+        "review_flag": draft.review_flag,
+        "status": draft.status,
+        "status_label": draft.status.replace("_", " "),
+        "created_by": draft.created_by,
+        "created_at": draft.created_at.isoformat(),
+        "approved_by": draft.approved_by,
+        "approved_at": draft.approved_at.isoformat() if draft.approved_at else None,
+        "approval_note": draft.approval_note,
+        "notification_id": draft.notification_id,
+    }
+
+
 def _load_case(store: SQLiteStore, pathway: Pathway, case_id: str) -> Case:
     try:
         return store.load_case(case_id, pathway)
@@ -471,6 +538,7 @@ def create_app(
     *,
     session_secret: str | None = None,
     session_max_age: int | None = None,
+    message_provider: AIProvider | None = None,
 ) -> FastAPI:
     """Build an isolated CareFlow API application.
 
@@ -497,6 +565,7 @@ def create_app(
     if resolved_session_max_age <= 0:
         raise ValueError("session_max_age must be positive")
     signer = URLSafeTimedSerializer(resolved_session_secret, salt=SESSION_SALT)
+    resolved_message_provider = message_provider or create_message_provider()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -510,6 +579,8 @@ def create_app(
     app.state.session_secret = resolved_session_secret
     app.state.session_max_age = resolved_session_max_age
     app.state.session_cookie = SESSION_COOKIE
+    app.state.message_provider = resolved_message_provider
+    app.state.ai_provider = resolved_message_provider
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     @app.exception_handler(TransitionError)
@@ -607,13 +678,34 @@ def create_app(
                 detail="an authorized approver must submit a matching documented approval",
             )
 
-    def log_case_access(user: User, case_id: str, action: str, endpoint: str) -> None:
+    def authorize_message_approval(user: User, case: Case) -> None:
+        """Keep message approval under the same owner/approver role boundary."""
+
+        if user.role == "patient":
+            raise HTTPException(status_code=403, detail="patients cannot approve message drafts")
+        allowed_roles = set(resolved_pathway.approvers)
+        if not case.closed:
+            allowed_roles.add(resolved_pathway.states[case.state]["owner"])
+        if user.role not in allowed_roles:
+            raise HTTPException(
+                status_code=403,
+                detail=f"role '{user.role}' cannot approve a message draft for {case.state}",
+            )
+
+    def log_case_access(
+        user: User,
+        case_id: str,
+        action: str,
+        endpoint: str,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> None:
         store.record_access(
             user_id=user.id,
             case_id=case_id,
             action=action,
             occurred_at=now(),
             endpoint=endpoint,
+            metadata=metadata,
         )
 
     def user_response(user: User) -> dict[str, Any]:
@@ -780,6 +872,189 @@ def create_app(
         store.save_case(case)
         log_case_access(user, case.id, "mutation", f"/cases/{case_id}/assign")
         return _case_payload(store, case, timestamp)
+
+    @app.post("/cases/{case_id}/message-drafts", status_code=201)
+    @app.post("/cases/{case_id}/drafts", status_code=201, include_in_schema=False)
+    @app.post("/cases/{case_id}/draft-message", status_code=201, include_in_schema=False)
+    def create_message_draft(
+        case_id: str,
+        http_request: Request,
+        request: MessageDraftInput | None = None,
+    ) -> dict[str, Any]:
+        """Generate and persist a review-controlled patient message.
+
+        This route only reads the case context and writes ``message_drafts``;
+        it deliberately does not call ``Case.transition`` or ``save_case``.
+        """
+
+        user = authenticated_user(http_request)
+        case = _load_case(store, resolved_pathway, case_id)
+        record = authorize_case_access(user, case_id)
+        operational_user(user)
+        request = request or MessageDraftInput()
+        patient = store.get_user(record.get("patient_user_id")) if record.get("patient_user_id") else None
+        context = {
+            "case_id": case.id,
+            "state": case.state,
+            "urgent": case.urgent,
+            "patient_name": patient.name if patient else None,
+        }
+        try:
+            generated = app.state.message_provider.draft(
+                context,
+                language=request.language,
+                template=request.template,
+            )
+        except ProviderUnavailableError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except ProviderError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        timestamp = now()
+        review_required = generated.review_required or generated.language != "en"
+        review_flag = generated.review_flag
+        if generated.language != "en":
+            review_flag = REVIEW_FLAG
+        try:
+            draft_id = store.add_message_draft(
+                case_id=case.id,
+                patient_user_id=record.get("patient_user_id"),
+                language=generated.language,
+                template=generated.template,
+                message=generated.message,
+                provider=generated.provider,
+                review_required=review_required,
+                review_flag=review_flag,
+                created_by=user.id,
+                created_at=timestamp,
+            )
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        draft = store.get_message_draft(draft_id)
+        assert draft is not None
+        log_case_access(
+            user,
+            case.id,
+            "mutation",
+            f"/cases/{case_id}/message-drafts",
+            metadata={"draft_id": draft.id, "language": draft.language, "provider": draft.provider},
+        )
+        return _message_draft_payload(draft)
+
+    @app.get("/cases/{case_id}/message-drafts", status_code=200)
+    @app.get("/cases/{case_id}/drafts", status_code=200, include_in_schema=False)
+    def list_case_message_drafts(
+        case_id: str,
+        http_request: Request,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        user = authenticated_user(http_request)
+        _load_case(store, resolved_pathway, case_id)
+        authorize_case_access(user, case_id)
+        normalized_status = status.strip().lower().replace(" ", "_") if status else None
+        try:
+            drafts = store.list_message_drafts(case_id=case_id, status=normalized_status)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        log_case_access(user, case_id, "read", f"/cases/{case_id}/message-drafts")
+        return [_message_draft_payload(draft) for draft in drafts]
+
+    @app.get("/message-drafts", status_code=200)
+    @app.get("/drafts", status_code=200, include_in_schema=False)
+    def list_message_drafts(
+        http_request: Request,
+        status: str | None = None,
+        case_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        user = authenticated_user(http_request)
+        operational_user(user)
+        if case_id is not None:
+            _load_case(store, resolved_pathway, case_id)
+            authorize_case_access(user, case_id)
+        normalized_status = status.strip().lower().replace(" ", "_") if status else None
+        try:
+            drafts = store.list_message_drafts(case_id=case_id, status=normalized_status)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        for draft_case_id in sorted({draft.case_id for draft in drafts}):
+            log_case_access(user, draft_case_id, "read", "/message-drafts")
+        return [_message_draft_payload(draft) for draft in drafts]
+
+    @app.get("/message-drafts/{draft_id}", status_code=200)
+    def get_message_draft(draft_id: str, http_request: Request) -> dict[str, Any]:
+        user = authenticated_user(http_request)
+        draft = store.get_message_draft(draft_id)
+        if draft is None:
+            raise HTTPException(status_code=404, detail=f"message draft not found: {draft_id}")
+        _load_case(store, resolved_pathway, draft.case_id)
+        authorize_case_access(user, draft.case_id)
+        log_case_access(user, draft.case_id, "read", f"/message-drafts/{draft_id}")
+        return _message_draft_payload(draft)
+
+    @app.post("/message-drafts/{draft_id}/approve", status_code=200)
+    @app.post("/drafts/{draft_id}/approve", status_code=200, include_in_schema=False)
+    @app.post(
+        "/cases/{case_id}/message-drafts/{draft_id}/approve",
+        status_code=200,
+        include_in_schema=False,
+    )
+    def approve_message_draft(
+        draft_id: str,
+        http_request: Request,
+        request: MessageApprovalInput | None = None,
+        case_id: str | None = None,
+    ) -> dict[str, Any]:
+        user = authenticated_user(http_request)
+        draft = store.get_message_draft(draft_id)
+        if draft is None:
+            raise HTTPException(status_code=404, detail=f"message draft not found: {draft_id}")
+        if case_id is not None and case_id != draft.case_id:
+            raise HTTPException(status_code=404, detail="message draft is not attached to this case")
+        case = _load_case(store, resolved_pathway, draft.case_id)
+        authorize_case_access(user, draft.case_id)
+        authorize_message_approval(user, case)
+        if draft.status != "pending_approval":
+            raise HTTPException(status_code=409, detail=f"message draft is already {draft.status}")
+
+        patient_user_id = draft.patient_user_id or (store.get_case_record(draft.case_id) or {}).get(
+            "patient_user_id"
+        )
+        patient = store.get_user(patient_user_id) if patient_user_id else None
+        if patient is None or not patient.is_active or patient.role != "patient":
+            raise HTTPException(
+                status_code=422,
+                detail="a linked active patient is required before a message can be approved",
+            )
+        approval = request or MessageApprovalInput()
+        timestamp = now()
+        try:
+            updated, notification = store.approve_message_draft(
+                draft.id,
+                approved_by=user.id,
+                approved_at=timestamp,
+                approval_note=approval.note,
+                recipient=patient.email or patient.id,
+                consent_user_id=patient.id,
+                payload={
+                    "patient_user_id": patient.id,
+                    "review_required": draft.review_required,
+                },
+            )
+        except ValueError as exc:
+            detail = str(exc)
+            if "consent" in detail.lower():
+                raise HTTPException(status_code=403, detail=detail) from exc
+            raise HTTPException(status_code=409, detail=detail) from exc
+        log_case_access(
+            user,
+            draft.case_id,
+            "mutation",
+            f"/message-drafts/{draft_id}/approve",
+            metadata={"draft_id": draft.id, "notification_id": notification["id"]},
+        )
+        result = _message_draft_payload(updated)
+        result["notification"] = _jsonable(notification)
+        return result
 
     @app.get("/cases/{case_id}", status_code=200)
     def get_case(case_id: str, http_request: Request) -> dict[str, Any]:

@@ -2,8 +2,8 @@
 
 The engine remains the source of truth for transition rules.  ``SQLiteStore``
 stores a validated ``Case`` snapshot and can rehydrate it for later API work,
-while keeping operational records (users, consents, evidence, approvals and
-notifications) in separate tables.
+while keeping operational records (users, consents, evidence, approvals,
+message drafts and notifications) in separate tables.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 import sqlite3
 from typing import Any, Mapping
+from uuid import uuid4
 
 from careflow.engine import Case, Pathway
 
@@ -105,6 +106,25 @@ CREATE TABLE IF NOT EXISTS notification_outbox (
     dedupe_key TEXT UNIQUE
 );
 
+CREATE TABLE IF NOT EXISTS message_drafts (
+    id TEXT PRIMARY KEY,
+    case_id TEXT NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+    patient_user_id TEXT REFERENCES users(id),
+    language TEXT NOT NULL,
+    template TEXT NOT NULL,
+    message TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    review_required INTEGER NOT NULL CHECK (review_required IN (0, 1)),
+    review_flag TEXT,
+    status TEXT NOT NULL CHECK (status IN ('pending_approval', 'approved', 'rejected')),
+    created_by TEXT NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL,
+    approved_by TEXT REFERENCES users(id),
+    approved_at TEXT,
+    approval_note TEXT,
+    notification_id TEXT
+);
+
 CREATE TABLE IF NOT EXISTS access_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id TEXT NOT NULL REFERENCES users(id),
@@ -119,6 +139,8 @@ CREATE INDEX IF NOT EXISTS idx_cases_state ON cases(state);
 CREATE INDEX IF NOT EXISTS idx_cases_owner ON cases(owner);
 CREATE INDEX IF NOT EXISTS idx_audit_case ON audit_events(case_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_outbox_ready ON notification_outbox(status, available_at);
+CREATE INDEX IF NOT EXISTS idx_message_drafts_case ON message_drafts(case_id, created_at, id);
+CREATE INDEX IF NOT EXISTS idx_message_drafts_status ON message_drafts(status, created_at, id);
 CREATE INDEX IF NOT EXISTS idx_access_case ON access_logs(case_id, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_access_user ON access_logs(user_id, occurred_at);
 """
@@ -189,6 +211,28 @@ class ApprovalRecord:
 
 
 @dataclass(frozen=True)
+class MessageDraftRecord:
+    """Persisted patient-message draft awaiting human approval."""
+
+    id: str
+    case_id: str
+    patient_user_id: str | None
+    language: str
+    template: str
+    message: str
+    provider: str
+    review_required: bool
+    review_flag: str | None
+    status: str
+    created_by: str
+    created_at: datetime
+    approved_by: str | None = None
+    approved_at: datetime | None = None
+    approval_note: str | None = None
+    notification_id: str | None = None
+
+
+@dataclass(frozen=True)
 class AccessLog:
     """A successful authenticated access to a case or case collection."""
 
@@ -250,6 +294,7 @@ class SQLiteStore:
         "approvals",
         "audit_events",
         "notification_outbox",
+        "message_drafts",
         "access_logs",
     }
 
@@ -288,6 +333,7 @@ class SQLiteStore:
         with self.connection:
             for table in (
                 "access_logs",
+                "message_drafts",
                 "notification_outbox",
                 "audit_events",
                 "approvals",
@@ -507,6 +553,157 @@ class SQLiteStore:
             )
             for row in rows
         ]
+
+    def add_message_draft(
+        self,
+        *,
+        case_id: str,
+        patient_user_id: str | None,
+        language: str,
+        template: str,
+        message: str,
+        provider: str,
+        review_required: bool,
+        review_flag: str | None,
+        created_by: str,
+        created_at: datetime | str,
+        draft_id: str | None = None,
+    ) -> str:
+        """Persist a generated draft without touching the case snapshot."""
+
+        if self.get_case_record(case_id) is None:
+            raise KeyError(f"case not found: {case_id}")
+        if not message.strip():
+            raise ValueError("a message draft must not be blank")
+        draft_id = draft_id or f"message-draft:{uuid4().hex}"
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO message_drafts
+                    (id, case_id, patient_user_id, language, template, message, provider,
+                     review_required, review_flag, status, created_by, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_approval', ?, ?)
+                """,
+                (
+                    draft_id,
+                    case_id,
+                    patient_user_id,
+                    language,
+                    template,
+                    message,
+                    provider,
+                    int(review_required),
+                    review_flag,
+                    created_by,
+                    _iso(created_at),
+                ),
+            )
+        return draft_id
+
+    def get_message_draft(self, draft_id: str) -> MessageDraftRecord | None:
+        row = self.connection.execute(
+            "SELECT * FROM message_drafts WHERE id = ?", (draft_id,)
+        ).fetchone()
+        return None if row is None else self._message_draft_row(row)
+
+    def list_message_drafts(
+        self,
+        *,
+        case_id: str | None = None,
+        status: str | None = None,
+    ) -> list[MessageDraftRecord]:
+        query, args = "SELECT * FROM message_drafts", []
+        clauses = []
+        if case_id is not None:
+            clauses.append("case_id = ?")
+            args.append(case_id)
+        if status is not None:
+            status = status.strip().lower().replace(" ", "_")
+            if status not in {"pending_approval", "approved", "rejected"}:
+                raise ValueError("unknown message draft status")
+            clauses.append("status = ?")
+            args.append(status)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at, id"
+        rows = self.connection.execute(query, args).fetchall()
+        return [self._message_draft_row(row) for row in rows]
+
+    def approve_message_draft(
+        self,
+        draft_id: str,
+        *,
+        approved_by: str,
+        approved_at: datetime | str,
+        approval_note: str,
+        recipient: str | None,
+        payload: Mapping[str, Any] | None = None,
+        consent_user_id: str | None = None,
+        channel: str = "internal",
+    ) -> tuple[MessageDraftRecord, dict[str, Any]]:
+        """Approve one draft and queue one outbox row atomically.
+
+        Consent is checked immediately before the outbox insert and the check
+        lives in the same store operation as the draft status update.  No
+        delivery worker is invoked here; the resulting row remains ``queued``.
+        """
+
+        draft = self.get_message_draft(draft_id)
+        if draft is None:
+            raise KeyError(f"message draft not found: {draft_id}")
+        if draft.status != "pending_approval":
+            raise ValueError(f"message draft is already {draft.status}")
+        if not approval_note.strip():
+            raise ValueError("an approval note is required")
+        approved_at = _datetime(approved_at)
+        if not self.has_valid_consent(
+            draft.case_id,
+            user_id=consent_user_id or draft.patient_user_id,
+            now=approved_at,
+        ):
+            raise ValueError("case notification requires a granted, unexpired case/user consent")
+
+        notification_id = f"notification:patient_message:{draft.case_id}:{draft.id}"
+        notification_payload = dict(payload or {})
+        notification_payload.setdefault("draft_id", draft.id)
+        notification_payload.setdefault("message", draft.message)
+        notification_payload.setdefault("language", draft.language)
+        notification_payload.setdefault("review_flag", draft.review_flag)
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO notification_outbox
+                    (id, case_id, event, channel, recipient, payload_json, status,
+                     available_at, created_at, dedupe_key)
+                VALUES (?, ?, 'patient_message', ?, ?, ?, 'queued', ?, ?, ?)
+                """,
+                (
+                    notification_id,
+                    draft.case_id,
+                    channel,
+                    recipient,
+                    _json(notification_payload),
+                    _iso(approved_at),
+                    _iso(approved_at),
+                    f"message-draft:{draft.id}",
+                ),
+            )
+            self.connection.execute(
+                """
+                UPDATE message_drafts
+                SET status = 'approved', approved_by = ?, approved_at = ?, approval_note = ?, notification_id = ?
+                WHERE id = ? AND status = 'pending_approval'
+                """,
+                (approved_by, _iso(approved_at), approval_note, notification_id, draft.id),
+            )
+
+        updated = self.get_message_draft(draft.id)
+        assert updated is not None
+        row = self.connection.execute(
+            "SELECT * FROM notification_outbox WHERE id = ?", (notification_id,)
+        ).fetchone()
+        assert row is not None
+        return updated, self._outbox_row(row)
 
     def save_case(self, case: Case, *, patient_user_id: str | None = None) -> None:
         """Persist a case and its complete audit snapshot atomically."""
@@ -880,6 +1077,27 @@ class SQLiteStore:
             "SELECT * FROM notification_outbox ORDER BY created_at, id"
         ).fetchall()
         return [self._outbox_row(row) for row in rows]
+
+    @staticmethod
+    def _message_draft_row(row: sqlite3.Row) -> MessageDraftRecord:
+        return MessageDraftRecord(
+            id=row["id"],
+            case_id=row["case_id"],
+            patient_user_id=row["patient_user_id"],
+            language=row["language"],
+            template=row["template"],
+            message=row["message"],
+            provider=row["provider"],
+            review_required=bool(row["review_required"]),
+            review_flag=row["review_flag"],
+            status=row["status"],
+            created_by=row["created_by"],
+            created_at=_datetime(row["created_at"]),
+            approved_by=row["approved_by"],
+            approved_at=_datetime(row["approved_at"]) if row["approved_at"] else None,
+            approval_note=row["approval_note"],
+            notification_id=row["notification_id"],
+        )
 
     @staticmethod
     def _outbox_row(row: sqlite3.Row) -> dict[str, Any]:
