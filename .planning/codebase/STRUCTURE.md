@@ -53,8 +53,8 @@ careflow-prototype/
 
 **`careflow/`:**
 - Purpose: Holds the complete production/runtime Python package for the prototype.
-- Contains: Domain logic, HTTP adapter, persistence repository, command-line modules, simulation code, and pathway specifications in `careflow/` and `careflow/pathways/`.
-- Key files: `careflow/engine.py`, `careflow/persistence.py`, `careflow/api.py`, and `careflow/pathways/screening_to_care.yaml`.
+- Contains: Domain engine, HTTP/UI adapter, persistence repository, AI/message boundary, metrics, command-line modules, simulation code, pathway specifications, Jinja2 templates, and CSS.
+- Key files: `careflow/engine.py`, `careflow/persistence.py`, `careflow/api.py`, `careflow/ai.py`, and `careflow/metrics.py`.
 
 **`careflow/pathways/`:**
 - Purpose: Stores declarative workflow specifications consumed by `Pathway.load` in `careflow/engine.py`.
@@ -63,8 +63,17 @@ careflow-prototype/
 
 **`tests/`:**
 - Purpose: Groups all automated verification outside the application package.
-- Contains: Pytest modules with shared pathway/time setup and temporary database fixtures.
-- Key files: `tests/test_engine.py`, `tests/test_api.py`, and `tests/test_persistence.py`.
+- Contains: Pytest modules with shared pathway/time setup, temporary SQLite fixtures, provider tests, HTML tests, and documentation checks.
+- Key files: `tests/test_engine.py`, `tests/test_api.py`, `tests/test_auth.py`, `tests/test_messages.py`, `tests/test_metrics.py`, `tests/test_html.py`, and `tests/test_persistence.py`.
+
+**`careflow/templates/` and `careflow/static/`:**
+- Purpose: Provide the server-rendered dashboard, patient status pages, and visual styling.
+- Contains: `landing.html`, `worklist.html`, `case.html`, `patient.html`, `metrics.html`, `error.html`, `base.html`, and `style.css`.
+- Used by: `careflow/api.py` when a request explicitly prefers `text/html`; JSON remains the default API representation.
+
+**`docs/`:**
+- Purpose: Explain runtime boundaries, synthetic-data safety limits, and the judge/demo flow.
+- Key files: `docs/architecture.md`, `docs/safety.md`, and `docs/demo-script.md`.
 
 **`.planning/codebase/`:**
 - Purpose: Stores GSD codebase mapping artifacts used by planning and execution agents.
@@ -73,8 +82,8 @@ careflow-prototype/
 
 **Project root:**
 - Purpose: Defines runtime, installation, container, test, and contributor-facing commands.
-- Contains: `README.md`, `Makefile`, `Dockerfile`, `.python-version`, `requirements.txt`, `requirements.lock`, `.gitignore`, and the ignored local database `careflow.db`.
-- Key files: `README.md` is the operational contract; `Dockerfile` launches `careflow.api:app`; `Makefile` provides `test`, `demo`, and `seed-demo` targets.
+- Contains: `README.md`, `Makefile`, `Dockerfile`, `.dockerignore`, `.python-version`, `requirements.txt`, `requirements.lock`, `.env.example`, `.gitignore`, and the ignored local database `careflow.db`.
+- Key files: `README.md` is the operational contract; `Dockerfile` installs the lock, seeds a local DB, and launches `careflow.api:app`; `Makefile` provides `test`, `demo`, and `seed-demo` targets.
 
 ## Key File Locations
 
@@ -90,20 +99,28 @@ careflow-prototype/
 - `careflow/api.py`: Default pathway path, database default, clock resolution, and session environment variable names.
 - `careflow/persistence.py`: SQLite schema, table names, indexes, foreign keys, and record constraints.
 - `.python-version`: Python version pin.
-- `requirements.txt`: Direct package pins for FastAPI, Uvicorn, Pydantic transitively, PyYAML, HTTPX, and Pytest.
+- `requirements.txt`: Direct package pins for FastAPI, HTTPX, itsdangerous, Jinja2, PyYAML, pytest, and Uvicorn.
 - `requirements.lock`: Reproducible resolved package set.
+- `.env.example`: Environment-variable template; keep secret values outside repository files.
 
 **Core Logic:**
 - `careflow/engine.py`: `Pathway`, `Case`, transition validation, evidence/approval checks, audit events, `explain`, and `worklist`.
 - `careflow/persistence.py`: `SQLiteStore`, aggregate snapshot rehydration, operational record persistence, consent checks, access logs, and notification outbox.
-- `careflow/api.py`: HTTP boundary models and route orchestration; it should not contain independent state-machine rules.
+- `careflow/api.py`: HTTP/auth/UI boundary models and route orchestration; it should not contain independent state-machine rules.
+- `careflow/ai.py`: Content-only message providers; no store or mutable case access.
+- `careflow/metrics.py`: Pure audit-derived measures; `careflow/sim.py` holds assumption-based simulation.
 - `careflow/seed.py`: Synthetic route construction that exercises engine transitions and persistence records.
-- `careflow/sim.py`: Independent seeded model calculations for the console demo.
+- `careflow/templates/`: Jinja2 dashboard/patient/error views; `careflow/static/style.css`: presentation assets.
 
 **Testing:**
 - `tests/test_engine.py`: Test pathway validation, legal/illegal transitions, closure controls, owners, worklist ordering, and deterministic simulation.
 - `tests/test_api.py`: Test app-factory isolation, case CRUD/mutations, JSON error contracts, closure API behavior, worklist ordering, and metrics.
+- `tests/test_auth.py`: Test signed sessions, role authorization, patient isolation, active users, assignment, and access logs.
+- `tests/test_messages.py`: Test offline/LLM provider selection, draft lifecycle, language review flags, consent checks, and queued outbox rows.
+- `tests/test_metrics.py`: Test audit-derived durations, rates, overdue states, drop-off reasons, and empty samples.
+- `tests/test_html.py`: Test content negotiation, Jinja2 pages, landing/demo login, and patient isolation.
 - `tests/test_persistence.py`: Test SQLite round trips, audit/evidence/approval/outbox persistence, consent-backed notifications, and repeatable seeding.
+- `tests/test_docs.py`: Test required markers in `README.md` and `docs/`.
 - `Makefile`: The canonical local test alias is `make test`, which runs `python -m pytest -q`.
 
 ## Naming Conventions
@@ -115,8 +132,8 @@ careflow-prototype/
 - Use uppercase names for project-level documentation/configuration conventions where already established, such as `README.md`, `Dockerfile`, and `.planning/codebase/ARCHITECTURE.md`.
 
 **Directories:**
-- Use lowercase package and feature directories, as in `careflow/`, `careflow/pathways/`, `tests/`, and `.planning/codebase/`.
-- Keep pathway files beneath `careflow/pathways/` rather than beside Python modules or in the project root.
+- Use lowercase package and feature directories, as in `careflow/`, `careflow/pathways/`, `careflow/templates/`, `careflow/static/`, `tests/`, and `.planning/codebase/`.
+- Keep pathway files beneath `careflow/pathways/`, templates beneath `careflow/templates/`, and static assets beneath `careflow/static/` rather than beside Python modules or in the project root.
 
 **Functions and Variables:**
 - Use `snake_case` for functions, methods, local variables, and endpoint helper names, as in `create_app`, `load_case`, `save_case`, `seed_demo`, and `case_id` in `careflow/`.
@@ -134,9 +151,11 @@ careflow-prototype/
 
 **New Feature:**
 - Primary domain behavior: Add or update domain rules in `careflow/engine.py`; keep route handlers in `careflow/api.py` as orchestration that loads, delegates, saves, and serializes.
-- HTTP surface: Add request models and route handlers in `careflow/api.py`, using `create_app` dependencies rather than module-level database access.
+- HTTP/UI surface: Add request models and route handlers in `careflow/api.py`; add server-rendered views in `careflow/templates/` and styling in `careflow/static/style.css` when presentation changes.
 - Persistence: Extend `SCHEMA`, records, and repository methods in `careflow/persistence.py`; preserve parameterized SQL, foreign keys, explicit transactions, and `load_case`/`save_case` round-trip behavior.
-- Tests: Add domain assertions to `tests/test_engine.py`, endpoint assertions to `tests/test_api.py`, and repository/schema assertions to `tests/test_persistence.py` according to the feature boundary.
+- Provider/content behavior: Extend `careflow/ai.py` without giving providers a store or mutable `Case`; test in `tests/test_messages.py`.
+- Metrics behavior: Extend `careflow/metrics.py` with audit-proof semantics and test in `tests/test_metrics.py`; keep what-if assumptions in `careflow/sim.py`.
+- Tests: Add assertions to the matching module (`tests/test_engine.py`, `tests/test_api.py`, `tests/test_auth.py`, `tests/test_messages.py`, `tests/test_metrics.py`, `tests/test_html.py`, or `tests/test_persistence.py`) according to the feature boundary.
 - Documentation/commands: Update `README.md`, `Makefile`, or `Dockerfile` when the feature changes setup, run, test, or deploy behavior.
 
 **New Pathway:**
@@ -146,11 +165,11 @@ careflow-prototype/
 
 **New Component/Module:**
 - Implementation: Add a focused lowercase `snake_case.py` module under `careflow/` only when the responsibility does not fit the domain engine, repository, API adapter, or existing CLI modules.
-- Imports: Keep dependencies directed toward `careflow/engine.py` for domain policy and `careflow/persistence.py` for storage; avoid making `careflow/engine.py` depend on FastAPI or SQLite.
+- Imports: Keep dependencies directed toward `careflow/engine.py` for domain policy and `careflow/persistence.py` for storage; keep provider and metrics modules independent of HTTP/SQLite; avoid making `careflow/engine.py` depend on FastAPI or SQLite.
 - Public compatibility: Re-export only deliberate deployment-facing names through `careflow/app.py`; `careflow/__init__.py` currently contains no public exports.
 
 **Utilities:**
-- Shared helpers: Keep domain calculations in `careflow/engine.py`, persistence serialization/time helpers in `careflow/persistence.py`, and API JSON/request helpers in `careflow/api.py` until a genuinely cross-layer utility is identified.
+- Shared helpers: Keep domain calculations in `careflow/engine.py`, persistence serialization/time helpers in `careflow/persistence.py`, API JSON/request/view helpers in `careflow/api.py`, and language/template normalization in `careflow/ai.py` until a genuinely cross-layer utility is identified.
 - Avoid an unscoped utility module: There is no existing `careflow/utils.py`, so place a new helper beside the owning abstraction rather than introducing a catch-all module.
 
 ## Special Directories
@@ -164,6 +183,11 @@ careflow-prototype/
 - Purpose: GSD planning and mapping artifacts for codebase-aware implementation planning.
 - Generated: Yes, by mapping/planning workflows.
 - Committed: The directory is part of project planning state; keep generated documents separate from runtime package code.
+
+**`careflow/templates/` and `careflow/static/`:**
+- Purpose: Authored Jinja2 pages and CSS used by the HTML adapter.
+- Generated: No.
+- Committed: Yes; HTML routes depend on these files when `Accept: text/html` is requested.
 
 **`__pycache__/` and `.pytest_cache/`:**
 - Purpose: Python bytecode and Pytest cache data created locally.
