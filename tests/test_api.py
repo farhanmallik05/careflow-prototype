@@ -79,6 +79,9 @@ def test_case_happy_paths_create_get_transition_assign_and_metrics(tmp_path):
         assert metrics.status_code == 200
         assert metrics.json()["total_cases"] == 1
         assert metrics.json()["open_cases"] == 1
+        assert metrics.json()["time_to_notification_hours"] == 0.0
+        assert metrics.json()["time_to_notification_sample_size"] == 1
+        assert metrics.json()["observed_metrics"]["acknowledgement_rate"]["sample_size"] == 1
 
 
 def test_invalid_transition_is_a_clear_four_xx_response(tmp_path):

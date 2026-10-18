@@ -7,7 +7,6 @@ snapshot; they never assign a new case state themselves.
 
 from __future__ import annotations
 
-from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import datetime
 import os
@@ -37,6 +36,7 @@ from careflow.ai import (
     normalize_template,
 )
 from careflow.engine import Case, Pathway, TransitionError, explain, worklist
+from careflow.metrics import compute_metrics
 from careflow.persistence import MessageDraftRecord, SQLiteStore, User
 from careflow.sim import compare
 
@@ -1135,29 +1135,9 @@ def create_app(
         records = store.list_case_records()
         cases = [_load_case(store, resolved_pathway, record["id"]) for record in records]
         rows = worklist(cases, timestamp)
-        state_counts = Counter(case.state for case in cases)
-        overdue = sum(1 for case in cases if (details := explain(case, timestamp)) and details["overdue"])
-        attention = sum(1 for case in cases if (details := explain(case, timestamp)) and details["attention"])
-        total = len(cases)
-        closed = sum(case.closed for case in cases)
-        open_cases = total - closed
-        urgent = sum(case.urgent for case in cases)
-        result = {
-            "total": total,
-            "open": open_cases,
-            "closed": closed,
-            "urgent": urgent,
-            "overdue": overdue,
-            "attention": attention,
-            "worklist": len(rows),
-            "by_state": dict(sorted(state_counts.items())),
-            # Explicit aliases make the payload self-documenting for clients
-            # while retaining concise names for dashboards.
-            "total_cases": total,
-            "open_cases": open_cases,
-            "closed_cases": closed,
-            "worklist_cases": len(rows),
-        }
+        result = compute_metrics(cases, resolved_pathway, timestamp)
+        result["worklist"] = len(rows)
+        result["worklist_cases"] = len(rows)
         for record in records:
             log_case_access(user, record["id"], "metrics", "/metrics")
         if _request_wants_html(http_request):
@@ -1171,6 +1151,7 @@ def create_app(
                         {"label": _label(state), "count": count}
                         for state, count in result["by_state"].items()
                     ],
+                    "observed_metrics": result["observed_metrics"],
                     "simulation": _simulation_view(compare()),
                     "as_of": _format_datetime(timestamp),
                 },

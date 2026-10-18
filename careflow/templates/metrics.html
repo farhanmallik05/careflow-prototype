@@ -35,6 +35,41 @@
     </div>
   </section>
 
+  <section class="content-section" aria-labelledby="observed-title">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">Audit-derived observed metrics</p>
+        <h2 id="observed-title">Pathway performance measures</h2>
+      </div>
+    </div>
+    <p class="section-note">These measures use persisted audit timestamps, evidence, approvals, and pathway SLAs. Sample sizes are shown so an empty denominator is visible.</p>
+    <div class="table-card table-scroll">
+      <table>
+        <caption class="sr-only">Observed metrics computed from persisted case audits</caption>
+        <thead><tr><th scope="col">Measure</th><th scope="col">Value</th><th scope="col">Sample size</th></tr></thead>
+        <tbody>
+          <tr><th scope="row">Time to notification (mean hours)</th><td>{{ observed_metrics.time_to_notification.mean_hours if observed_metrics.time_to_notification.mean_hours is not none else "—" }}</td><td>{{ observed_metrics.time_to_notification.sample_size }}</td></tr>
+          <tr><th scope="row">Acknowledgement rate</th><td>{% if observed_metrics.acknowledgement_rate.rate is not none %}{{ (observed_metrics.acknowledgement_rate.rate * 100)|round(1) }}%{% else %}—{% endif %}</td><td>{{ observed_metrics.acknowledgement_rate.sample_size }}</td></tr>
+          <tr><th scope="row">Time to referral acceptance (mean hours)</th><td>{{ observed_metrics.time_to_referral_acceptance.mean_hours if observed_metrics.time_to_referral_acceptance.mean_hours is not none else "—" }}</td><td>{{ observed_metrics.time_to_referral_acceptance.sample_size }}</td></tr>
+          <tr><th scope="row">Referral completion rate</th><td>{% if observed_metrics.referral_completion_rate.rate is not none %}{{ (observed_metrics.referral_completion_rate.rate * 100)|round(1) }}%{% else %}—{% endif %}</td><td>{{ observed_metrics.referral_completion_rate.sample_size }}</td></tr>
+          <tr><th scope="row">Overdue cases</th><td>{{ observed_metrics.overdue_count.count }}</td><td>{{ observed_metrics.overdue_count.sample_size }}</td></tr>
+          <tr><th scope="row">Documented closure rate</th><td>{% if observed_metrics.documented_closure_rate.rate is not none %}{{ (observed_metrics.documented_closure_rate.rate * 100)|round(1) }}%{% else %}—{% endif %}</td><td>{{ observed_metrics.documented_closure_rate.sample_size }}</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="section-heading compact-heading"><div><p class="eyebrow">Delay and drop-off reasons</p><h3>Audit-derived reason counts</h3></div></div>
+    <div class="table-card table-scroll">
+      <table>
+        <caption class="sr-only">Reasons for delay or drop-off from current audited states and actions</caption>
+        <thead><tr><th scope="col">Reason</th><th scope="col">Cases</th></tr></thead>
+        <tbody>
+          {% for reason, count in observed_metrics.reasons_for_delay_or_dropoff.counts.items() %}<tr><th scope="row">{{ reason|replace("_", " ")|title }}</th><td>{{ count }}</td></tr>{% else %}<tr><td colspan="2">No delay or drop-off reasons are recorded.</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
   <section class="content-section simulation-section" aria-labelledby="simulation-title">
     <div class="section-heading">
       <div>

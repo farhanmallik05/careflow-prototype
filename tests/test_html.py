@@ -44,6 +44,9 @@ def test_html_pages_render_operational_context_and_keep_default_json(tmp_path):
         metrics = client.get("/metrics", headers=HTML)
         assert metrics.status_code == 200
         assert "Total cases" in metrics.text
+        assert "Audit-derived observed metrics" in metrics.text
+        assert "Time to notification" in metrics.text
+        assert "Audit-derived reason counts" in metrics.text
         assert "modelled from assumptions, not clinical evidence" in metrics.text
 
         default_worklist = client.get("/worklist")
