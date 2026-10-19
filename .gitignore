@@ -11,6 +11,8 @@ careflow*.sqlite3
 *.sqlite-wal
 *.sqlite-shm
 careflow-data/
+scratch/
+*.sqlite
 *.tar
 *.tar.gz
 .env

@@ -289,6 +289,29 @@ class ConsentInput(BaseModel):
         return value
 
 
+class EHRAppointmentWebhookInput(BaseModel):
+    resourceType: str = "Appointment"
+    id: str | None = None
+    appointment_id: str | None = None
+    status: str
+    patient_id: str | None = None
+    case_id: str | None = None
+    cancellation_reason: str | None = None
+    rescheduled_start: str | None = None
+    note: str | None = None
+
+
+class DeliveryReceiptInput(BaseModel):
+    MessageSid: str | None = None
+    id: str | None = None
+    notification_id: str | None = None
+    MessageStatus: str | None = None
+    status: str | None = None
+    ErrorCode: str | None = None
+    error_code: str | None = None
+    ErrorMessage: str | None = None
+
+
 def _jsonable(value: Any) -> Any:
     """Convert engine values to JSON without changing their meaning."""
 
@@ -776,6 +799,20 @@ def create_app(
         if value.tzinfo is None:
             return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
+
+    _rate_limit_lock = threading.Lock()
+    _request_counts: dict[str, list[float]] = {}
+
+    def check_rate_limit(request: Request, max_requests: int = 120, window_seconds: float = 60.0) -> None:
+        client_ip = request.client.host if request.client else "unknown"
+        current_ts = time.time()
+        with _rate_limit_lock:
+            history = _request_counts.setdefault(client_ip, [])
+            cutoff = current_ts - window_seconds
+            _request_counts[client_ip] = [ts for ts in history if ts > cutoff]
+            if len(_request_counts[client_ip]) >= max_requests:
+                raise HTTPException(status_code=429, detail="too many requests, rate limit exceeded")
+            _request_counts[client_ip].append(current_ts)
 
     def authenticated_session(request: Request) -> tuple[User, SessionRecord]:
         handle = request.cookies.get(SESSION_COOKIE)
@@ -1757,6 +1794,126 @@ def create_app(
                 },
             )
         return result
+
+    @app.post("/api/ehr/appointments/webhook", status_code=200)
+    @app.post("/ehr/appointments/webhook", status_code=200, include_in_schema=False)
+    def handle_ehr_appointment_webhook(
+        payload: EHRAppointmentWebhookInput,
+        http_request: Request,
+    ) -> dict[str, Any]:
+        """Ingest FHIR R4 appointment updates from EHR and trigger automated case workflows."""
+        check_rate_limit(http_request)
+        case_id = payload.case_id
+        if not case_id and payload.patient_id:
+            records = store.list_case_records()
+            for r in records:
+                if r.get("patient_user_id") == payload.patient_id and not r.get("closed"):
+                    case_id = r.get("id")
+                    break
+        if not case_id:
+            raise HTTPException(status_code=404, detail="case not found for ehr appointment sync")
+
+        case = _load_case(store, resolved_pathway, case_id)
+        current_time = now()
+        action_taken = "none"
+
+        status_norm = (payload.status or "").lower()
+        if status_norm == "cancelled":
+            if case.state == "appointment_booked":
+                reason = payload.cancellation_reason or payload.note or "EHR cancellation"
+                case.transition(
+                    "cancel",
+                    "ehr-sync",
+                    current_time,
+                    evidence=["cancellation_reason"],
+                    evidence_provenance={"cancellation_reason": reason},
+                    next_owner=case.owner,
+                )
+                store.save_case(case)
+                action_taken = "cancelled_reschedule_queued"
+            else:
+                action_taken = f"ignored_state_{case.state}"
+        elif status_norm in ("rescheduled", "booked"):
+            if case.state == "appointment_booked":
+                new_time = payload.rescheduled_start or "TBD"
+                case.transition(
+                    "reschedule",
+                    "ehr-sync",
+                    current_time,
+                    evidence=["reschedule_record"],
+                    evidence_provenance={"new_time": new_time, "note": payload.note or "EHR Reschedule"},
+                )
+                store.save_case(case)
+                action_taken = "rescheduled"
+            elif case.state == "referral_accepted":
+                case.transition(
+                    "book",
+                    "ehr-sync",
+                    current_time,
+                    evidence=["appointment"],
+                    evidence_provenance={"time": payload.rescheduled_start or "TBD"},
+                )
+                store.save_case(case)
+                action_taken = "booked"
+            else:
+                action_taken = f"ignored_state_{case.state}"
+        elif status_norm in ("noshow", "no_show"):
+            if case.state == "appointment_booked":
+                case.transition("no_show", "ehr-sync", current_time)
+                store.save_case(case)
+                action_taken = "escalated_no_show"
+            else:
+                action_taken = f"ignored_state_{case.state}"
+        else:
+            action_taken = f"unsupported_status_{status_norm}"
+
+        return {
+            "status": "processed",
+            "case_id": case.id,
+            "current_state": case.state,
+            "action_taken": action_taken,
+            "timestamp": current_time.isoformat(),
+        }
+
+    @app.post("/webhooks/delivery-receipt", status_code=200)
+    @app.post("/api/webhooks/delivery-receipt", status_code=200, include_in_schema=False)
+    def handle_delivery_receipt(
+        payload: DeliveryReceiptInput,
+        http_request: Request,
+    ) -> dict[str, Any]:
+        """Ingest telephony/SMS carrier delivery receipts and record status."""
+        check_rate_limit(http_request)
+        target_id = payload.notification_id or payload.id or payload.MessageSid
+        if not target_id:
+            raise HTTPException(status_code=400, detail="notification identifier is required")
+
+        status_val = (payload.MessageStatus or payload.status or "").lower()
+        error_val = payload.ErrorCode or payload.error_code or payload.ErrorMessage
+
+        if status_val in ("delivered", "sent", "success"):
+            new_status = "sent"
+        elif status_val in ("failed", "undelivered", "rejected", "carrier_rejected"):
+            new_status = "failed"
+        else:
+            new_status = "sent"
+
+        with store.connection:
+            store.connection.execute(
+                """
+                UPDATE notification_outbox
+                SET status = ?, sent_at = COALESCE(sent_at, ?)
+                WHERE id = ? OR dedupe_key = ?
+                """,
+                (new_status, now().isoformat(), target_id, target_id),
+            )
+
+        return {
+            "status": "acknowledged",
+            "notification_id": target_id,
+            "carrier_status": status_val,
+            "outbox_status": new_status,
+            "error": error_val,
+        }
 
     return app
 

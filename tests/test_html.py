@@ -107,3 +107,14 @@ def test_patient_html_status_and_case_pages_are_isolated(tmp_path):
         logs = client.app.state.store.list_access_logs(user_id="demo-patient-001")
         assert [log.case_id for log in logs] == ["CASE-1", "CASE-1"]
         assert all(log.action == "read" for log in logs)
+
+
+def test_html_keyboard_shortcuts_modal_rendered(tmp_path):
+    with make_client(tmp_path) as client:
+        login(client, "demo-coordinator")
+        worklist_resp = client.get("/worklist", headers=HTML)
+        assert worklist_resp.status_code == 200
+        assert "shortcuts.js" in worklist_resp.text
+        assert "shortcuts-modal" in worklist_resp.text
+        assert "Navigator Keyboard Shortcuts" in worklist_resp.text
+

@@ -40,6 +40,73 @@ class OIDCClaims:
     nonce: str
     email: str | None = None
     name: str | None = None
+    groups: tuple[str, ...] = ()
+    roles: tuple[str, ...] = ()
+
+
+def map_enterprise_claims_to_role(
+    claims: OIDCClaims | Mapping[str, Any], default_role: str = "care_coordinator"
+) -> str:
+    """Map enterprise identity provider group and role claims to CareFlow clinical roles."""
+    if isinstance(claims, OIDCClaims):
+        groups = {str(g).lower() for g in claims.groups}
+        roles = {str(r).lower() for r in claims.roles}
+    else:
+        raw_groups = claims.get("groups") or claims.get("group") or []
+        if isinstance(raw_groups, str):
+            raw_groups = [raw_groups]
+        groups = {str(g).lower() for g in raw_groups}
+        raw_roles = claims.get("roles") or claims.get("role") or []
+        if isinstance(raw_roles, str):
+            raw_roles = [raw_roles]
+        roles = {str(r).lower() for r in raw_roles}
+
+    combined = groups | roles
+
+    # High-privilege clinical supervisor
+    supervisor_keywords = {
+        "clinicalsupervisor", "clinical_supervisor", "clinicaldirectors",
+        "hospital-clinical-supervisors", "chiefmedicalofficer", "supervisor"
+    }
+    if combined & supervisor_keywords or any("supervisor" in x for x in combined):
+        return "clinical_supervisor"
+
+    # Clinician on call
+    on_call_keywords = {
+        "oncallclinicians", "clinician_on_call", "hospital-on-call",
+        "physicianoncall", "on_call"
+    }
+    if combined & on_call_keywords or any("on_call" in x or "on-call" in x for x in combined):
+        return "clinician_on_call"
+
+    # Care Coordinator / Navigator
+    coordinator_keywords = {
+        "navigators", "carecoordinators", "care_coordinator",
+        "hospital-oncology-navigators", "navigator", "coordinator", "navigation"
+    }
+    if combined & coordinator_keywords or any("navigator" in x or "coordinator" in x for x in combined):
+        return "care_coordinator"
+
+    # Specialist (Oncology, Surgery, Radiology, etc.)
+    specialist_keywords = {
+        "specialists", "specialist", "oncologists", "surgeons",
+        "hospital-specialists", "oncology"
+    }
+    if combined & specialist_keywords or any("specialist" in x or "oncolog" in x or "surgeon" in x for x in combined):
+        return "specialist"
+
+    # Primary Care
+    pcp_keywords = {
+        "primarycare", "primary_care", "pcp", "familymedicine", "internalmedicine"
+    }
+    if combined & pcp_keywords or any("primary" in x for x in combined):
+        return "primary_care"
+
+    # Patient
+    if "patient" in combined:
+        return "patient"
+
+    return default_role
 
 
 class OIDCProvider(Protocol):

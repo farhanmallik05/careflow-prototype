@@ -9,6 +9,6 @@ states:
   referral_created:     {owner: care_coordinator, sla_hours: 72, next: {accept: {to: referral_accepted, requires: [acceptance]}, reject: {to: referral_rejected}}}
   referral_rejected:    {owner: care_coordinator, sla_hours: 24, attention: true, next: {reassign: {to: referral_created}}}
   referral_accepted:    {owner: specialist, sla_hours: 168, next: {book: {to: appointment_booked, requires: [appointment]}}}
-  appointment_booked:   {owner: specialist, sla_hours: 336, next: {attend: {to: care_received, requires: [attendance]}, no_show: {to: escalated}}}
+  appointment_booked:   {owner: specialist, sla_hours: 336, next: {attend: {to: care_received, requires: [attendance]}, no_show: {to: escalated}, cancel: {to: referral_accepted, requires: [cancellation_reason]}, reschedule: {to: appointment_booked, requires: [reschedule_record]}}}
   care_received:        {owner: care_coordinator, sla_hours: 72, next: {close: {to: closed, requires: [closure_note]}}}
   escalated:            {owner: clinician_on_call, sla_hours: 12, attention: true, next: {resolve: {to: patient_notified, requires: [human_decision]}, unreachable: {to: closed_unreachable, requires: [unreachable_exhaustion_note]}, refuse: {to: closed_refused, requires: [patient_refusal_documentation, supervisor_signoff]}, transfer: {to: closed_transferred, requires: [transfer_of_care_record, supervisor_signoff]}, exhaust: {to: closed_unreachable_exhausted, requires: [outreach_exhaustion_protocol, supervisor_signoff]}}}
