@@ -189,6 +189,46 @@ ON CONFLICT(key) DO UPDATE SET value = excluded.value;
 """
 
 
+MIGRATION_IDENTITY_SESSION_SCHEMA = """
+CREATE TABLE IF NOT EXISTS oidc_identity_links (
+    id TEXT PRIMARY KEY,
+    issuer TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    approved INTEGER NOT NULL DEFAULT 1 CHECK (approved IN (0, 1)),
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_oidc_identity_lookup
+    ON oidc_identity_links(issuer, subject);
+CREATE INDEX IF NOT EXISTS idx_oidc_identity_user
+    ON oidc_identity_links(user_id);
+
+CREATE TABLE IF NOT EXISTS oidc_login_states (
+    state TEXT PRIMARY KEY,
+    nonce TEXT NOT NULL,
+    code_verifier TEXT NOT NULL,
+    redirect_uri TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    consumed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    handle_hash TEXT NOT NULL UNIQUE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    csrf_token_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    idle_expires_at TEXT NOT NULL,
+    absolute_expires_at TEXT NOT NULL,
+    revoked_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(idle_expires_at, absolute_expires_at);
+"""
+
+
 @dataclass(frozen=True)
 class _Migration:
     version: int
@@ -213,9 +253,23 @@ def _apply_runtime_metadata(connection: sqlite3.Connection) -> None:
             connection.execute(statement)
 
 
+def _apply_sql(connection: sqlite3.Connection, sql: str) -> None:
+    for statement in sql.split(";"):
+        if statement.strip():
+            connection.execute(statement)
+
+
 MIGRATIONS = (
     _Migration(1, "baseline-careflow-schema", SCHEMA + MIGRATION_METADATA_SCHEMA, _apply_baseline),
-    _Migration(2, "runtime-lifecycle-metadata", MIGRATION_RUNTIME_METADATA, _apply_runtime_metadata),
+    _Migration(
+        2,
+        "runtime-lifecycle-metadata",
+        MIGRATION_RUNTIME_METADATA + MIGRATION_IDENTITY_SESSION_SCHEMA,
+        lambda connection: (
+            _apply_runtime_metadata(connection),
+            _apply_sql(connection, MIGRATION_IDENTITY_SESSION_SCHEMA),
+        ),
+    ),
 )
 MIGRATIONS_BY_VERSION = {migration.version: migration for migration in MIGRATIONS}
 LEGACY_TABLES = frozenset(
@@ -230,6 +284,10 @@ LEGACY_TABLES = frozenset(
         "message_drafts",
         "access_logs",
     }
+)
+
+IDENTITY_SESSION_TABLES = frozenset(
+    {"oidc_identity_links", "oidc_login_states", "sessions"}
 )
 
 USER_ROLES = frozenset(
@@ -258,8 +316,48 @@ class User:
     created_at: datetime | None = None
 
     def __post_init__(self) -> None:
-        if self.role not in USER_ROLES:
+        if self.role and self.role not in USER_ROLES:
             raise ValueError(f"unknown user role: {self.role}")
+
+
+@dataclass(frozen=True)
+class OIDCIdentityLink:
+    """An approved immutable external identity to local-user mapping."""
+
+    id: str
+    issuer: str
+    subject: str
+    user_id: str
+    approved: bool = True
+    created_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class OIDCLoginState:
+    """A short-lived server-side authorization-code transaction."""
+
+    state: str
+    nonce: str
+    code_verifier: str
+    redirect_uri: str
+    created_at: datetime
+    expires_at: datetime
+    consumed_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class SessionRecord:
+    """Server-side session metadata; the browser only receives its handle."""
+
+    id: str
+    handle_hash: str
+    user_id: str
+    csrf_token_hash: str
+    created_at: datetime
+    last_seen_at: datetime
+    idle_expires_at: datetime
+    absolute_expires_at: datetime
+    revoked_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -372,6 +470,10 @@ def _from_json(value: str, default: Any) -> Any:
     return json.loads(value)
 
 
+def _secret_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
 class SQLiteStore:
     """Small, synchronous SQLite repository used by the prototype and seed.
 
@@ -391,6 +493,9 @@ class SQLiteStore:
         "notification_outbox",
         "message_drafts",
         "access_logs",
+        "oidc_identity_links",
+        "oidc_login_states",
+        "sessions",
     }
 
     def __init__(self, path: str | Path = "careflow.db", *, auto_migrate: bool = True) -> None:
@@ -462,7 +567,11 @@ class SQLiteStore:
             raise DatabaseLifecycleError(
                 f"database schema version {version} is behind supported version {CURRENT_SCHEMA_VERSION}"
             )
-        missing = (LEGACY_TABLES | {"schema_migrations", "database_metadata"}) - self._table_names()
+        missing = (
+            LEGACY_TABLES
+            | IDENTITY_SESSION_TABLES
+            | {"schema_migrations", "database_metadata"}
+        ) - self._table_names()
         if missing:
             raise DatabaseLifecycleError("database schema is missing required tables")
         rows = self.connection.execute(
@@ -519,8 +628,30 @@ class SQLiteStore:
                 raise DatabaseLifecycleError("database migration history is incomplete")
             for row in rows:
                 migration = MIGRATIONS_BY_VERSION.get(int(row[0]))
-                if migration is None or row[1] != migration.name or row[2] != migration.checksum:
+                if migration is None or row[1] != migration.name:
                     raise DatabaseLifecycleError("database migration history does not match this release")
+                # Phase 2 databases already at revision 2 used the runtime
+                # metadata checksum before identity/session tables were added.
+                # Upgrade that known shape in place without rewriting records.
+                if (
+                    int(row[0]) == 2
+                    and row[2] != migration.checksum
+                    and not IDENTITY_SESSION_TABLES.issubset(tables)
+                ):
+                    continue
+                if row[2] != migration.checksum:
+                    raise DatabaseLifecycleError("database migration history does not match this release")
+
+            if version == 2 and not IDENTITY_SESSION_TABLES.issubset(tables):
+                migration = MIGRATIONS_BY_VERSION[2]
+                with self.connection:
+                    self.connection.execute("BEGIN IMMEDIATE")
+                    _apply_sql(self.connection, MIGRATION_IDENTITY_SESSION_SCHEMA)
+                    self.connection.execute(
+                        "UPDATE schema_migrations SET checksum = ? WHERE version = 2",
+                        (migration.checksum,),
+                    )
+                tables = self._table_names()
 
         for migration in MIGRATIONS:
             if migration.version <= version:
@@ -602,6 +733,9 @@ class SQLiteStore:
                 "access_logs",
                 "message_drafts",
                 "notification_outbox",
+                "oidc_login_states",
+                "sessions",
+                "oidc_identity_links",
                 "audit_events",
                 "approvals",
                 "evidence",
@@ -669,6 +803,283 @@ class SQLiteStore:
             )
             for row in rows
         ]
+
+    def add_identity_link(self, link: OIDCIdentityLink) -> None:
+        """Approve one exact ``(issuer, subject)`` mapping to a local user."""
+
+        if not link.issuer.strip() or not link.subject.strip() or not link.user_id.strip():
+            raise ValueError("identity issuer, subject, and user_id are required")
+        if self.get_user(link.user_id) is None:
+            raise KeyError(f"user not found: {link.user_id}")
+        created_at = link.created_at or datetime.now(timezone.utc)
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO oidc_identity_links
+                    (id, issuer, subject, user_id, approved, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    issuer = excluded.issuer,
+                    subject = excluded.subject,
+                    user_id = excluded.user_id,
+                    approved = excluded.approved
+                """,
+                (
+                    link.id,
+                    link.issuer.strip(),
+                    link.subject.strip(),
+                    link.user_id.strip(),
+                    int(link.approved),
+                    _iso(created_at),
+                ),
+            )
+
+    def link_identity(
+        self,
+        issuer: str,
+        subject: str,
+        user_id: str,
+        *,
+        approved: bool = True,
+        link_id: str | None = None,
+        created_at: datetime | str | None = None,
+    ) -> str:
+        """Convenience API for provisioning an approved OIDC identity link."""
+
+        identity_id = link_id or f"oidc:{_secret_hash(issuer + chr(0) + subject)[:32]}"
+        self.add_identity_link(
+            OIDCIdentityLink(
+                id=identity_id,
+                issuer=issuer,
+                subject=subject,
+                user_id=user_id,
+                approved=approved,
+                created_at=_datetime(created_at) if created_at is not None else None,
+            )
+        )
+        return identity_id
+
+    def resolve_identity(self, issuer: str, subject: str) -> User | None:
+        """Return a uniquely approved local user for an external principal."""
+
+        rows = self.connection.execute(
+            """
+            SELECT user_id FROM oidc_identity_links
+            WHERE issuer = ? AND subject = ? AND approved = 1
+            ORDER BY id
+            """,
+            (issuer, subject),
+        ).fetchall()
+        if len(rows) != 1:
+            return None
+        return self.get_user(str(rows[0]["user_id"]))
+
+    def list_identity_links(
+        self,
+        *,
+        issuer: str | None = None,
+        subject: str | None = None,
+        user_id: str | None = None,
+    ) -> list[OIDCIdentityLink]:
+        clauses: list[str] = []
+        args: list[str] = []
+        for name, value in (("issuer", issuer), ("subject", subject), ("user_id", user_id)):
+            if value is not None:
+                clauses.append(f"{name} = ?")
+                args.append(value)
+        query = "SELECT * FROM oidc_identity_links"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY id"
+        rows = self.connection.execute(query, args).fetchall()
+        return [
+            OIDCIdentityLink(
+                id=row["id"],
+                issuer=row["issuer"],
+                subject=row["subject"],
+                user_id=row["user_id"],
+                approved=bool(row["approved"]),
+                created_at=_datetime(row["created_at"]),
+            )
+            for row in rows
+        ]
+
+    def create_oidc_login_state(
+        self,
+        *,
+        state: str,
+        nonce: str,
+        code_verifier: str,
+        redirect_uri: str,
+        created_at: datetime | str,
+        expires_at: datetime | str,
+    ) -> OIDCLoginState:
+        record = OIDCLoginState(
+            state=state,
+            nonce=nonce,
+            code_verifier=code_verifier,
+            redirect_uri=redirect_uri,
+            created_at=_datetime(created_at),
+            expires_at=_datetime(expires_at),
+        )
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO oidc_login_states
+                    (state, nonce, code_verifier, redirect_uri, created_at, expires_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.state,
+                    record.nonce,
+                    record.code_verifier,
+                    record.redirect_uri,
+                    _iso(record.created_at),
+                    _iso(record.expires_at),
+                ),
+            )
+        return record
+
+    def consume_oidc_login_state(
+        self, state: str, *, consumed_at: datetime | str
+    ) -> OIDCLoginState | None:
+        """Atomically consume a state value so callback replay is rejected."""
+
+        timestamp = _datetime(consumed_at)
+        with self._lock, self.connection:
+            row = self.connection.execute(
+                "SELECT * FROM oidc_login_states WHERE state = ? AND consumed_at IS NULL",
+                (state,),
+            ).fetchone()
+            if row is None:
+                return None
+            updated = self.connection.execute(
+                """
+                UPDATE oidc_login_states SET consumed_at = ?
+                WHERE state = ? AND consumed_at IS NULL
+                """,
+                (_iso(timestamp), state),
+            )
+            if updated.rowcount != 1:
+                return None
+        return OIDCLoginState(
+            state=row["state"],
+            nonce=row["nonce"],
+            code_verifier=row["code_verifier"],
+            redirect_uri=row["redirect_uri"],
+            created_at=_datetime(row["created_at"]),
+            expires_at=_datetime(row["expires_at"]),
+            consumed_at=timestamp,
+        )
+
+    def create_session(
+        self,
+        *,
+        user_id: str,
+        created_at: datetime | str,
+        idle_expires_at: datetime | str,
+        absolute_expires_at: datetime | str,
+        handle: str | None = None,
+        csrf_token: str | None = None,
+        revoke_existing: bool = True,
+    ) -> tuple[str, str, SessionRecord]:
+        """Create a high-entropy opaque session and return its raw handle once."""
+
+        if self.get_user(user_id) is None:
+            raise KeyError(f"user not found: {user_id}")
+        handle = handle or uuid4().hex + uuid4().hex
+        csrf_token = csrf_token or uuid4().hex + uuid4().hex
+        record = SessionRecord(
+            id=f"session:{uuid4().hex}",
+            handle_hash=_secret_hash(handle),
+            user_id=user_id,
+            csrf_token_hash=_secret_hash(csrf_token),
+            created_at=_datetime(created_at),
+            last_seen_at=_datetime(created_at),
+            idle_expires_at=_datetime(idle_expires_at),
+            absolute_expires_at=_datetime(absolute_expires_at),
+        )
+        with self._lock, self.connection:
+            if revoke_existing:
+                self.connection.execute(
+                    "UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+                    (_iso(record.created_at), user_id),
+                )
+            self.connection.execute(
+                """
+                INSERT INTO sessions
+                    (id, handle_hash, user_id, csrf_token_hash, created_at, last_seen_at,
+                     idle_expires_at, absolute_expires_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.id,
+                    record.handle_hash,
+                    record.user_id,
+                    record.csrf_token_hash,
+                    _iso(record.created_at),
+                    _iso(record.last_seen_at),
+                    _iso(record.idle_expires_at),
+                    _iso(record.absolute_expires_at),
+                ),
+            )
+        return handle, csrf_token, record
+
+    def get_session(self, handle: str) -> SessionRecord | None:
+        row = self.connection.execute(
+            "SELECT * FROM sessions WHERE handle_hash = ?", (_secret_hash(handle),)
+        ).fetchone()
+        if row is None:
+            return None
+        return SessionRecord(
+            id=row["id"],
+            handle_hash=row["handle_hash"],
+            user_id=row["user_id"],
+            csrf_token_hash=row["csrf_token_hash"],
+            created_at=_datetime(row["created_at"]),
+            last_seen_at=_datetime(row["last_seen_at"]),
+            idle_expires_at=_datetime(row["idle_expires_at"]),
+            absolute_expires_at=_datetime(row["absolute_expires_at"]),
+            revoked_at=_datetime(row["revoked_at"]) if row["revoked_at"] else None,
+        )
+
+    def touch_session(
+        self,
+        session_id: str,
+        *,
+        last_seen_at: datetime | str,
+        idle_expires_at: datetime | str,
+    ) -> None:
+        with self._lock, self.connection:
+            self.connection.execute(
+                """
+                UPDATE sessions SET last_seen_at = ?, idle_expires_at = ?
+                WHERE id = ? AND revoked_at IS NULL
+                """,
+                (_iso(last_seen_at), _iso(idle_expires_at), session_id),
+            )
+
+    def revoke_session(self, handle: str, *, revoked_at: datetime | str) -> bool:
+        with self._lock, self.connection:
+            updated = self.connection.execute(
+                """
+                UPDATE sessions SET revoked_at = ?
+                WHERE handle_hash = ? AND revoked_at IS NULL
+                """,
+                (_iso(revoked_at), _secret_hash(handle)),
+            )
+        return updated.rowcount == 1
+
+    def revoke_user_sessions(self, user_id: str, *, revoked_at: datetime | str) -> int:
+        with self._lock, self.connection:
+            updated = self.connection.execute(
+                """
+                UPDATE sessions SET revoked_at = ?
+                WHERE user_id = ? AND revoked_at IS NULL
+                """,
+                (_iso(revoked_at), user_id),
+            )
+        return int(updated.rowcount)
 
     def add_consent(self, consent: Consent) -> None:
         if consent.status not in {"pending", "granted", "withdrawn"}:

@@ -31,7 +31,7 @@ py -3.12.12 -m venv .venv
 python -m pip install --requirement requirements.lock
 ```
 
-The application reads configuration from the process environment; `.env.example` documents the typed settings but is not loaded automatically. `CAREFLOW_MODE=demo` is the explicit local/judge mode. `CAREFLOW_MODE=pilot` fails closed unless OIDC, trusted-origin, session, and synthetic-only settings are present; the current phase reserves the OIDC verification callback for the identity phase. For a local run, set a fresh session secret and keep it outside the repository:
+The application reads configuration from the process environment; `.env.example` documents the typed settings but is not loaded automatically. `CAREFLOW_MODE=demo` is the explicit local/judge mode. `CAREFLOW_MODE=pilot` fails closed unless OIDC, trusted-origin, session, and synthetic-only settings are present. For a local run, set a fresh session secret and keep it outside the repository:
 
 ```bash
 export CAREFLOW_SESSION_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
@@ -39,6 +39,8 @@ export CAREFLOW_MODE=demo
 export CAREFLOW_SYNTHETIC_ONLY=true
 export CAREFLOW_ALLOW_DEMO_LOGIN=true
 export CAREFLOW_SESSION_MAX_AGE=3600
+export CAREFLOW_SESSION_IDLE_AGE=3600
+export CAREFLOW_SESSION_ABSOLUTE_AGE=28800
 export CAREFLOW_MESSAGE_PROVIDER=rule_based
 ```
 
@@ -49,7 +51,7 @@ curl -sS http://127.0.0.1:8000/health/live
 curl -sS http://127.0.0.1:8000/health/ready
 ```
 
-`CAREFLOW_SESSION_SECRET` signs the `careflow_session` cookie. The default session lifetime is 3,600 seconds. `rule_based` is the deterministic, offline message provider used by tests and demos.
+`CAREFLOW_SESSION_SECRET` protects local session records. The default idle lifetime is 3,600 seconds and the default absolute lifetime is 28,800 seconds. `rule_based` is the deterministic, offline message provider used by tests and demos.
 
 ## Seed, run, and test
 
@@ -194,9 +196,9 @@ curl -sS -H 'Accept: application/json' \
   http://127.0.0.1:8000/cases/DEMO-001
 ```
 
-### Auth and signed demo sessions
+### Auth and sessions
 
-There is no password or external identity provider in this prototype. Login accepts an active seeded user ID and sets an `HttpOnly`, `SameSite=Lax` timed signed cookie named `careflow_session`:
+Demo mode has no password or external identity provider. When `CAREFLOW_ALLOW_DEMO_LOGIN=true`, login accepts an active seeded synthetic user ID and sets an opaque local session handle:
 
 ```bash
 curl -sS -i -c careflow.cookies \
@@ -208,7 +210,18 @@ curl -sS -b careflow.cookies http://127.0.0.1:8000/auth/current-user
 curl -sS -X POST -b careflow.cookies http://127.0.0.1:8000/auth/logout
 ```
 
-The browser's `/demo-login/{user_id}` links create the same signed session and redirect staff to `/worklist` or patients to their status page. The API also exposes `POST /auth/login`, `GET /auth/current-user`, and `POST /auth/logout` (with compatibility aliases documented by the OpenAPI route surface).
+The browser's `/demo-login/{user_id}` links create the same local session and redirect staff to `/worklist` or patients to their status page. The API exposes `POST /auth/login`, `GET /auth/current-user`, and `POST /auth/logout`. Demo login is unavailable when `CAREFLOW_MODE=pilot` or `CAREFLOW_ALLOW_DEMO_LOGIN=false`.
+
+Pilot mode uses the provider-neutral OIDC boundary in `careflow/oidc.py`:
+
+1. `GET /auth/login/start` creates server-side state, nonce, and PKCE verifier records and redirects to the configured provider using the exact `CAREFLOW_OIDC_REDIRECT_URI`.
+2. `GET /auth/callback` consumes state once, exchanges the authorization code, verifies PKCE, issuer, audience, signature, key, expiry, nonce, and required claims, then maps the verified `(issuer, subject)` to an approved local user.
+3. The browser receives only an opaque `careflow_session` handle (plus a separate CSRF token); session records, idle/absolute expiry, revocation, and the CSRF hash remain in SQLite.
+4. Cookie-authenticated mutations require a trusted `Origin` and the session's CSRF token. `POST /auth/logout` revokes the local session and clears cookies without contacting the upstream IdP; it does not claim that upstream SSO ended.
+
+Provisioning is explicit: call `SQLiteStore.link_identity(issuer, subject, user_id)` after creating an active local user with a non-empty role. Email and caller-supplied user IDs are never used as the external identity key. The offline `FakeOIDCProvider` is test-only; a deployment supplies a real `OIDCProvider` adapter through `create_app`, so tests never call a network service.
+
+The API also exposes `GET /auth/current-user` and `POST /auth/logout` (with compatibility aliases documented by the OpenAPI route surface). Pilot cookies are `Secure`, `HttpOnly`, `SameSite=Lax`, and path-scoped; demo cookies retain the local HTTP-friendly behavior needed for the synthetic click-through.
 
 Seeded roles are `lab`, `screening_program`, `primary_care`, `specialist`, `care_coordinator`, `clinician_on_call`, and `patient`. The authenticated user ID, not the request body's optional `actor` label, is recorded in case audit events.
 
@@ -253,7 +266,7 @@ curl -sS -b careflow.cookies -H 'Content-Type: application/json' \
   http://127.0.0.1:8000/message-drafts/{draft_id}/approve
 ```
 
-Approval atomically marks the draft approved and inserts one `patient_message` row in `notification_outbox` with status `queued`. The prototype has no delivery worker or external transport, so no message is sent. Selecting `CAREFLOW_MESSAGE_PROVIDER=llm` only selects an unconfigured boundary and returns a clear 503; it does not make a network request.
+Approval atomically marks the draft approved and inserts one `patient_message` row in `notification_outbox` with status `queued`. The prototype has no delivery worker or external transport, so no message is sent. The system deliberately documents that **no message is sent** by this local outbox. Selecting `CAREFLOW_MESSAGE_PROVIDER=llm` only selects an unconfigured boundary and returns a clear 503; it does not make a network request.
 
 ### Metrics
 

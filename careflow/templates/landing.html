@@ -24,6 +24,7 @@
         {% else %}
           <strong>Pilot identity is managed by the configured OIDC provider.</strong>
           <span>Demo login is disabled. No clinical or patient data is displayed here.</span>
+          <a class="button secondary" href="/auth/login/start">Sign in with organization</a>
         {% endif %}
       </div>
     {% endif %}
@@ -35,7 +36,7 @@
         <p class="eyebrow">Click-through demo</p>
         <h2 id="demo-users-title">Sign in as a demo user</h2>
       </div>
-      <p class="muted">Each link creates the same signed session cookie used by the JSON login endpoint.</p>
+       <p class="muted">Each link creates the same server-managed local session used by the JSON login endpoint.</p>
     </div>
     <div class="card-grid">
       {% for link in demo_links %}
@@ -65,7 +66,7 @@
     </article>
     <article class="card">
       <h2>Auditability</h2>
-      <p>Case reads remain subject to the signed-session authorization and access log already used by the API.</p>
+      <p>Case reads remain subject to the server-session authorization and access log already used by the API.</p>
     </article>
   </section>
 {% endblock %}

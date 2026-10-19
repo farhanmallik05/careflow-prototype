@@ -6,8 +6,9 @@ CareFlow is a small Python monolith with four explicit boundaries:
 
 1. `careflow/pathways/screening_to_care.yaml` declares the state graph, owner roles, SLAs, attention flags, terminal state, approver roles, and required transition evidence.
 2. `careflow/engine.py` is the domain authority. `Pathway` validates the graph; `Case.transition` and `Case.assign` are the only normal mutation methods; `explain` and `worklist` calculate operational decisions.
-3. `careflow/api.py` is the FastAPI adapter. It validates request bodies, verifies the timed signed session cookie, checks case/role access, calls the engine, and serializes JSON or Jinja2 HTML.
-4. `careflow/persistence.py` is the SQLite repository. It stores the current case snapshot alongside ordered audits and normalized operational records. Each public write uses a SQLite transaction.
+3. `careflow/oidc.py` is the provider-neutral managed-identity seam. It validates the authorization-code/PKCE result and verified claims; the deterministic `FakeOIDCProvider` is used only by offline tests.
+4. `careflow/api.py` is the FastAPI adapter. It validates request bodies, consumes OIDC state, maps `(issuer, subject)` to approved local users, verifies opaque server-side sessions/CSRF/origin policy, checks case/role access, calls the engine, and serializes JSON or Jinja2 HTML.
+5. `careflow/persistence.py` is the SQLite repository. It stores the current case snapshot alongside ordered audits, identity links, login transactions, revocable sessions, and normalized operational records. Each public write uses a SQLite transaction.
 
 `careflow/seed.py` and `careflow/demo.py` exercise the same pathway, engine, and repository boundaries. `careflow/ai.py` is a read-only content provider boundary; it never receives a `Case` or `SQLiteStore` and cannot mutate workflow state.
 
@@ -17,7 +18,7 @@ CareFlow is a small Python monolith with four explicit boundaries:
 Browser or API client
         |
         v
-FastAPI route (Pydantic input + signed-session authentication)
+FastAPI route (Pydantic input + OIDC/server-session authentication)
         |
         v
 Case access / role / patient-isolation checks
@@ -71,6 +72,9 @@ The pathway allows `clinician_on_call` and `care_coordinator` to submit a matchi
 | `message_drafts` | Provider output awaiting human approval |
 | `notification_outbox` | consent-gated queued events; no transport worker is present |
 | `access_logs` | Successful authenticated case reads and operational reads/mutations |
+| `oidc_identity_links` | Approved exact `(issuer, subject)` to local-user mappings |
+| `oidc_login_states` | One-time state, nonce, redirect, and PKCE verifier transactions |
+| `sessions` | Opaque handle hashes, CSRF hashes, expiry, and revocation metadata |
 
 `save_case` rejects an unknown state, an open case without an owner, or a closed case with an owner before writing. `load_case` rehydrates the stored audit/evidence rather than replaying transitions. The audit is therefore the source used by `careflow.metrics.compute_metrics` for observed measures.
 
@@ -131,7 +135,8 @@ The default `RuleBasedProvider` supports `en`, `hi`, and `bn`. Hindi and Bengali
 
 - **Configuration:** `Pathway.validate` rejects malformed graphs before the app starts.
 - **Transport:** Pydantic models reject blank actions, unsupported message languages/templates, and inconsistent IDs.
-- **Authentication:** active users receive a timed `careflow_session` signed with `CAREFLOW_SESSION_SECRET`.
+- **Authentication:** pilot users complete the configured OIDC authorization-code/PKCE flow; CareFlow verifies issuer, audience, signature/key, expiry, nonce, and required claims, maps the exact `(issuer, subject)` to an approved active role-bearing local user, and issues only an opaque `careflow_session` handle. Demo mode uses the same server-managed store but retains explicit synthetic-user login.
+- **Session boundary:** idle and absolute expiry are enforced on every request, local logout revokes the session without contacting the IdP, and local role/deactivation changes are re-read on every request. Pilot cookie mutations require a configured trusted `Origin` and a session-bound CSRF token.
 - **Authorization:** patients are isolated to their own linked case; worklist/metrics are staff-only; transitions require the current state's owner role or a matching authorized approval (role-based, separate from the owner ID); message approval uses the same owner/approver boundary.
 - **Workflow safety:** the engine rejects illegal actions, closed-case changes, missing required evidence, and unauthorized approvals.
 - **Persistence:** snapshot, audit, evidence, and approval writes are synchronized in a transaction; ownership invariants are checked before write.

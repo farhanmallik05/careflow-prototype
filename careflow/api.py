@@ -8,7 +8,8 @@ snapshot; they never assign a new case state themselves.
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import hashlib
 import secrets
 import sqlite3
 from pathlib import Path
@@ -19,7 +20,6 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from itsdangerous import BadSignature, BadTimeSignature, URLSafeTimedSerializer
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -37,7 +37,20 @@ from careflow.ai import (
 from careflow.config import CareFlowSettings, ConfigurationError
 from careflow.engine import Case, Pathway, TransitionError, explain, worklist
 from careflow.metrics import compute_metrics
-from careflow.persistence import CURRENT_SCHEMA_VERSION, MessageDraftRecord, SQLiteStore, User
+from careflow.oidc import (
+    OIDCProvider,
+    OIDCProviderUnavailable,
+    OIDCValidationError,
+    UnavailableOIDCProvider,
+    pkce_challenge,
+)
+from careflow.persistence import (
+    CURRENT_SCHEMA_VERSION,
+    MessageDraftRecord,
+    SessionRecord,
+    SQLiteStore,
+    User,
+)
 from careflow.sim import compare
 
 
@@ -46,8 +59,11 @@ TEMPLATES_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
 Clock = Callable[[], datetime]
 SESSION_COOKIE = "careflow_session"
-SESSION_SALT = "careflow-session"
+CSRF_COOKIE = "careflow_csrf"
 DEFAULT_SESSION_MAX_AGE = 3600
+DEFAULT_SESSION_IDLE_AGE = 3600
+DEFAULT_SESSION_ABSOLUTE_AGE = 28800
+CSRF_HEADER = "x-csrf-token"
 
 
 _template_environment = Environment(
@@ -540,7 +556,10 @@ def create_app(
     *,
     session_secret: str | None = None,
     session_max_age: int | None = None,
+    session_idle_age: int | None = None,
+    session_absolute_age: int | None = None,
     message_provider: AIProvider | None = None,
+    oidc_provider: OIDCProvider | None = None,
     settings: CareFlowSettings | None = None,
 ) -> FastAPI:
     """Build an isolated CareFlow API application.
@@ -572,7 +591,19 @@ def create_app(
         raise ConfigurationError("CAREFLOW_SESSION_SECRET must not be blank")
     if resolved_session_max_age <= 0:
         raise ValueError("session_max_age must be positive")
-    signer = URLSafeTimedSerializer(resolved_session_secret, salt=SESSION_SALT)
+    resolved_session_idle_age = session_idle_age
+    if resolved_session_idle_age is None:
+        resolved_session_idle_age = resolved_settings.session_idle_age or DEFAULT_SESSION_IDLE_AGE
+    resolved_session_absolute_age = session_absolute_age
+    if resolved_session_absolute_age is None:
+        resolved_session_absolute_age = (
+            resolved_settings.session_absolute_age or DEFAULT_SESSION_ABSOLUTE_AGE
+        )
+    if resolved_session_idle_age <= 0 or resolved_session_absolute_age <= 0:
+        raise ValueError("session idle and absolute ages must be positive")
+    if resolved_session_idle_age > resolved_session_absolute_age:
+        raise ValueError("session idle age must not exceed absolute session age")
+    resolved_oidc_provider = oidc_provider or UnavailableOIDCProvider()
     resolved_message_provider = message_provider or create_message_provider()
 
     @asynccontextmanager
@@ -586,12 +617,15 @@ def create_app(
     app.state.clock = resolved_clock
     app.state.session_secret = resolved_session_secret
     app.state.session_max_age = resolved_session_max_age
+    app.state.session_idle_age = resolved_session_idle_age
+    app.state.session_absolute_age = resolved_session_absolute_age
     app.state.session_cookie = SESSION_COOKIE
     app.state.settings = resolved_settings
     app.state.mode = resolved_settings.mode
     app.state.safe_diagnostics = resolved_settings.safe_diagnostics()
     app.state.message_provider = resolved_message_provider
     app.state.ai_provider = resolved_message_provider
+    app.state.oidc_provider = resolved_oidc_provider
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     @app.get("/health/live", include_in_schema=False)
@@ -656,20 +690,32 @@ def create_app(
             return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
 
-    def authenticated_user(request: Request) -> User:
-        token = request.cookies.get(SESSION_COOKIE)
-        if not token:
+    def authenticated_session(request: Request) -> tuple[User, SessionRecord]:
+        handle = request.cookies.get(SESSION_COOKIE)
+        if not handle:
             raise HTTPException(status_code=401, detail="authentication required")
-        try:
-            payload = signer.loads(token, max_age=resolved_session_max_age)
-        except (BadSignature, BadTimeSignature, TypeError, ValueError):
-            raise HTTPException(status_code=401, detail="invalid or expired session") from None
-        if not isinstance(payload, Mapping) or not isinstance(payload.get("user_id"), str):
-            raise HTTPException(status_code=401, detail="invalid session payload")
-        user = store.get_user(payload["user_id"])
-        if user is None or not user.is_active:
+        session = store.get_session(handle)
+        current = now()
+        if session is None or session.revoked_at is not None:
+            raise HTTPException(status_code=401, detail="invalid or expired session")
+        if resolved_settings.mode == "pilot" and (
+            current >= session.idle_expires_at or current >= session.absolute_expires_at
+        ):
+            store.revoke_session(handle, revoked_at=current)
+            raise HTTPException(status_code=401, detail="invalid or expired session")
+        user = store.get_user(session.user_id)
+        if user is None or not user.is_active or not user.role:
             raise HTTPException(status_code=401, detail="user is inactive or unknown")
-        return user
+        if resolved_settings.mode == "pilot":
+            idle_deadline = min(
+                current + timedelta(seconds=resolved_session_idle_age),
+                session.absolute_expires_at,
+            )
+            store.touch_session(session.id, last_seen_at=current, idle_expires_at=idle_deadline)
+        return user, session
+
+    def authenticated_user(request: Request) -> User:
+        return authenticated_session(request)[0]
 
     def operational_user(user: User) -> None:
         if user.role == "patient":
@@ -754,16 +800,62 @@ def create_app(
         payload = _user_payload(user)
         return {"user": payload, **payload}
 
-    def set_session_cookie(response: Response, user: User) -> None:
-        token = signer.dumps({"user_id": user.id})
+    def set_session_cookie(response: Response, user: User) -> str:
+        timestamp = now()
+        handle, csrf_token, _ = store.create_session(
+            user_id=user.id,
+            created_at=timestamp,
+            idle_expires_at=timestamp
+            + timedelta(seconds=resolved_session_idle_age),
+            absolute_expires_at=timestamp
+            + timedelta(seconds=resolved_session_absolute_age),
+        )
         response.set_cookie(
             SESSION_COOKIE,
-            token,
-            max_age=resolved_session_max_age,
+            handle,
+            max_age=resolved_session_absolute_age,
             httponly=True,
+            secure=not resolved_settings.demo_mode,
             samesite="lax",
             path="/",
         )
+        response.set_cookie(
+            CSRF_COOKIE,
+            csrf_token,
+            max_age=resolved_session_absolute_age,
+            httponly=False,
+            secure=not resolved_settings.demo_mode,
+            samesite="lax",
+            path="/",
+        )
+        response.headers["X-CSRF-Token"] = csrf_token
+        return csrf_token
+
+    def _trusted_origin(request: Request) -> bool:
+        origin = request.headers.get("origin", "").strip().rstrip("/")
+        return bool(origin) and origin in resolved_settings.trusted_origins
+
+    def _csrf_valid(request: Request) -> bool:
+        handle = request.cookies.get(SESSION_COOKIE)
+        token = request.headers.get(CSRF_HEADER, "")
+        if not handle or not token:
+            return False
+        session = store.get_session(handle)
+        if session is None:
+            return False
+        return secrets.compare_digest(
+            hashlib.sha256(token.encode("utf-8")).hexdigest(), session.csrf_token_hash
+        )
+
+    @app.middleware("http")
+    async def cookie_mutation_guard(request: Request, call_next: Any) -> Response:
+        if resolved_settings.mode == "pilot" and request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            if request.url.path not in {"/auth/login/start", "/auth/start", "/auth/callback"}:
+                if not _trusted_origin(request):
+                    return JSONResponse(status_code=403, content={"detail": "trusted origin required"})
+                if request.cookies.get(SESSION_COOKIE) and not _csrf_valid(request):
+                    return JSONResponse(status_code=403, content={"detail": "valid CSRF token required"})
+        return await call_next(request)
 
     def landing_context(request: Request) -> dict[str, Any]:
         try:
@@ -812,28 +904,105 @@ def create_app(
         if not user_id.startswith("demo-"):
             raise HTTPException(status_code=404, detail="demo user not found")
         user = store.get_user(user_id)
-        if user is None or not user.is_active:
+        if user is None or not user.is_active or not user.role:
             raise HTTPException(status_code=404, detail="demo user not found")
         target = f"/patient/{quote(user.id, safe='')}" if user.role == "patient" else "/worklist"
         response = RedirectResponse(url=target, status_code=303)
         set_session_cookie(response, user)
         return response
 
+    @app.get("/auth/login/start", status_code=303)
+    @app.get("/auth/start", status_code=303, include_in_schema=False)
+    def oidc_login_start() -> Response:
+        if resolved_settings.mode != "pilot":
+            raise HTTPException(status_code=404, detail="OIDC login is available only in pilot mode")
+        provider_issuer = getattr(resolved_oidc_provider, "issuer", "").rstrip("/")
+        if not provider_issuer or provider_issuer != resolved_settings.oidc_issuer.rstrip("/"):
+            raise HTTPException(status_code=503, detail="configured OIDC provider is unavailable")
+        state = secrets.token_urlsafe(32)
+        nonce = secrets.token_urlsafe(32)
+        code_verifier = secrets.token_urlsafe(48)
+        try:
+            code_challenge = pkce_challenge(code_verifier)
+            authorization_url = resolved_oidc_provider.authorization_url(
+                client_id=resolved_settings.oidc_client_id,
+                redirect_uri=resolved_settings.oidc_redirect_uri,
+                state=state,
+                nonce=nonce,
+                code_challenge=code_challenge,
+            )
+            store.create_oidc_login_state(
+                state=state,
+                nonce=nonce,
+                code_verifier=code_verifier,
+                redirect_uri=resolved_settings.oidc_redirect_uri,
+                created_at=now(),
+                expires_at=now() + timedelta(minutes=10),
+            )
+        except (OIDCProviderUnavailable, OIDCValidationError, sqlite3.IntegrityError) as exc:
+            raise HTTPException(status_code=503, detail="OIDC login is unavailable") from exc
+        return RedirectResponse(url=authorization_url, status_code=303)
+
+    @app.get("/auth/callback", status_code=200)
+    def oidc_callback(
+        request: Request,
+        response: Response,
+        code: str | None = None,
+        state: str | None = None,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        if resolved_settings.mode != "pilot":
+            raise HTTPException(status_code=404, detail="OIDC callback is available only in pilot mode")
+        if error or not state or not code:
+            raise HTTPException(status_code=401, detail="invalid OIDC callback")
+        timestamp = now()
+        login_state = store.consume_oidc_login_state(state, consumed_at=timestamp)
+        if login_state is None or timestamp >= login_state.expires_at:
+            raise HTTPException(status_code=401, detail="invalid or expired OIDC state")
+        if login_state.redirect_uri != resolved_settings.oidc_redirect_uri:
+            raise HTTPException(status_code=401, detail="OIDC redirect URI mismatch")
+        try:
+            token = resolved_oidc_provider.exchange_code(
+                code=code,
+                client_id=resolved_settings.oidc_client_id,
+                redirect_uri=login_state.redirect_uri,
+                code_verifier=login_state.code_verifier,
+            )
+            claims = resolved_oidc_provider.verify_id_token(
+                token,
+                client_id=resolved_settings.oidc_client_id,
+                nonce=login_state.nonce,
+                now=int(timestamp.timestamp()),
+            )
+        except (OIDCProviderUnavailable, OIDCValidationError) as exc:
+            raise HTTPException(status_code=401, detail="OIDC identity verification failed") from exc
+        if claims.issuer.rstrip("/") != resolved_settings.oidc_issuer.rstrip("/"):
+            raise HTTPException(status_code=401, detail="OIDC issuer is not trusted")
+        user = store.resolve_identity(claims.issuer, claims.subject)
+        if user is None or not user.is_active or not user.role:
+            raise HTTPException(status_code=403, detail="OIDC identity is not approved")
+        set_session_cookie(response, user)
+        return user_response(user)
+
     @app.post("/auth/login", status_code=200)
     @app.post("/login", status_code=200, include_in_schema=False)
     def login(request: LoginInput, response: Response) -> dict[str, Any]:
-        if not resolved_settings.demo_mode:
-            raise HTTPException(status_code=503, detail="pilot login requires the configured OIDC flow")
+        if not resolved_settings.demo_mode or not resolved_settings.allow_demo_login:
+            raise HTTPException(status_code=503, detail="demo login is disabled; use the configured OIDC flow")
         user = store.get_user(request.identifier)
-        if user is None or not user.is_active:
+        if user is None or not user.is_active or not user.role:
             raise HTTPException(status_code=401, detail="unknown or inactive user")
         set_session_cookie(response, user)
         return user_response(user)
 
     @app.post("/auth/logout", status_code=200)
     @app.post("/logout", status_code=200, include_in_schema=False)
-    def logout(response: Response) -> dict[str, bool]:
+    def logout(request: Request, response: Response) -> dict[str, bool]:
+        handle = request.cookies.get(SESSION_COOKIE)
+        if handle:
+            store.revoke_session(handle, revoked_at=now())
         response.delete_cookie(SESSION_COOKIE, path="/")
+        response.delete_cookie(CSRF_COOKIE, path="/")
         return {"ok": True}
 
     @app.get("/auth/current-user", status_code=200)

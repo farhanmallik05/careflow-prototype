@@ -7,7 +7,7 @@ CareFlow is a local/demo prototype. The seeded users, patient names, email addre
 The prototype does **not**:
 
 - diagnose, triage, recommend treatment, or make an autonomous clinical decision;
-- connect to an EHR, laboratory, scheduling system, identity provider, or external model service;
+- connect to an EHR, laboratory, scheduling system, or external model service; the pilot has a provider-neutral managed OIDC seam but this repository's offline tests use only `FakeOIDCProvider`;
 - send SMS, email, push, or other real patient notifications; or
 - accept production patient/health information as a compliant system of record.
 
@@ -37,14 +37,16 @@ Setting `CAREFLOW_MESSAGE_PROVIDER=llm` selects an intentionally unconfigured bo
 
 The current code provides these demo-level controls:
 
-- a timed, signed `careflow_session` cookie for active seeded users;
+- a server-managed opaque `careflow_session` handle for active local users, with pilot idle/absolute expiry, rotation, revocation, and local logout;
+- a provider-neutral OIDC authorization-code/PKCE seam that rejects invalid state, nonce, issuer, audience, signature/key, expiry, claims, code, and mappings;
+- pilot `Secure`/`HttpOnly`/`SameSite=Lax` cookies plus trusted-origin and session-bound CSRF checks for cookie mutations;
 - patient isolation for case and patient-status reads;
 - staff-only worklist and metrics access;
 - message drafting restricted to staff, with approval restricted to the current case's owner role or an authorized approver;
 - consent checks immediately before case notification/outbox writes; and
 - successful case reads, mutations, worklist accesses, and metrics accesses recorded in `access_logs`.
 
-These controls do not amount to production security or privacy compliance. The prototype has no password or external identity lifecycle, CSRF token, encryption-at-rest policy, key rotation, retention/deletion policy, backup policy, rate limiting, or production audit export. Use a deployment secret manager, keep `CAREFLOW_SESSION_SECRET` out of source and images, and keep the local SQLite database out of version control. Do not load real or sensitive data into this demo.
+These controls do not amount to production security or privacy compliance. CareFlow still does not own passwords or provide an upstream identity lifecycle, encryption-at-rest policy, key rotation, retention/deletion policy, rate limiting, or production audit export. A deployment must supply a real `OIDCProvider` adapter and a deployment-managed signing/session configuration. Use a deployment secret manager, keep `CAREFLOW_SESSION_SECRET` out of source and images, and keep the local SQLite database out of version control. Do not load real or sensitive data into this demo.
 
 ## SQLite recovery boundary
 
