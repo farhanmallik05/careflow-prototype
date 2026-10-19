@@ -22,7 +22,7 @@ The sequence intentionally follows the dependency graph: configuration and exist
 - Decimal phases (2.1, 2.2): urgent insertions, if later required
 
 - [x] **Phase 1: Contract Characterization & Fail-Closed Configuration** - Establish the current contract and make demo, pilot, configuration, and synthetic-data boundaries explicit.
-- [ ] **Phase 2: SQLite Lifecycle & Recovery Foundation** - Version, validate, transact, back up, and restore the pilot database safely.
+- [x] **Phase 2: SQLite Lifecycle & Recovery Foundation** - Version, validate, transact, back up, and restore the pilot database safely.
 - [ ] **Phase 3: Identity & Secure Session Boundary** - Authenticate through managed OIDC and issue revocable, server-managed local sessions.
 - [ ] **Phase 4: Authorization, Case Integrity & Consent-Gated Messaging** - Enforce relationship scope and bind every consequential case and messaging action to verified authority.
 - [ ] **Phase 5: Observability & Server-Rendered HTTP Safety** - Make failures diagnosable without leakage and keep HTML/JSON browser behavior safe and consistent.
@@ -156,7 +156,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Contract Characterization & Fail-Closed Configuration | 1/1 | Complete | 2026-10-19 |
-| 2. SQLite Lifecycle & Recovery Foundation | 0/TBD | Not started | - |
+| 2. SQLite Lifecycle & Recovery Foundation | Complete | Complete | 2026-10-19 |
 | 3. Identity & Secure Session Boundary | 0/TBD | Not started | - |
 | 4. Authorization, Case Integrity & Consent-Gated Messaging | 0/TBD | Not started | - |
 | 5. Observability & Server-Rendered HTTP Safety | 0/TBD | Not started | - |

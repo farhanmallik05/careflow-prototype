@@ -8,8 +8,7 @@ snapshot; they never assign a new case state themselves.
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from datetime import datetime
-import os
+from datetime import datetime, timezone
 import secrets
 import sqlite3
 from pathlib import Path
@@ -38,7 +37,7 @@ from careflow.ai import (
 from careflow.config import CareFlowSettings, ConfigurationError
 from careflow.engine import Case, Pathway, TransitionError, explain, worklist
 from careflow.metrics import compute_metrics
-from careflow.persistence import MessageDraftRecord, SQLiteStore, User
+from careflow.persistence import CURRENT_SCHEMA_VERSION, MessageDraftRecord, SQLiteStore, User
 from careflow.sim import compare
 
 
@@ -59,16 +58,18 @@ templates = Jinja2Templates(env=_template_environment)
 
 
 def _default_clock() -> datetime:
-    """Return a naive local timestamp, matching the existing demo seed."""
+    """Return a timezone-aware UTC timestamp for all application operations."""
 
-    return datetime.now()
+    return datetime.now(timezone.utc)
 
 
 def _clock_factory(clock: Clock | datetime | None) -> Clock:
     if clock is None:
         return _default_clock
     if isinstance(clock, datetime):
-        return lambda: clock
+        normalized = clock if clock.tzinfo is not None else clock.replace(tzinfo=timezone.utc)
+        normalized = normalized.astimezone(timezone.utc)
+        return lambda: normalized
     if not callable(clock):
         raise TypeError("clock must be a callable returning datetime")
     return clock
@@ -604,18 +605,21 @@ def create_app(
             "configuration": "ok",
             "pathway": "ok",
             "database": "ok",
+            "schema_version": None,
+            "supported_schema_version": CURRENT_SCHEMA_VERSION,
+            "foreign_keys": "on",
+            "integrity": "ok",
             "writable_storage": "ok",
         }
         try:
-            result = store.connection.execute("PRAGMA quick_check").fetchone()[0]
-            if result != "ok":
-                raise RuntimeError("database integrity check failed")
-            parent = Path(str(resolved_db_path)).expanduser().resolve().parent
-            if not parent.exists() or not os.access(parent, os.W_OK):
-                raise RuntimeError("database directory is not writable")
+            checks["schema_version"] = store.schema_version
+            store.verify_readiness()
         except Exception as exc:
             checks["database"] = "failed"
-            checks["detail"] = str(exc)
+            checks["integrity"] = "failed" if "integrity" in str(exc).lower() else checks["integrity"]
+            checks["foreign_keys"] = "failed" if "foreign" in str(exc).lower() else checks["foreign_keys"]
+            checks["writable_storage"] = "failed" if "writable" in str(exc).lower() else checks["writable_storage"]
+            checks["reason"] = type(exc).__name__.lower()
             return JSONResponse(status_code=503, content={"status": "not_ready", "checks": checks})
         return JSONResponse(status_code=200, content={"status": "ready", "checks": checks})
 
@@ -648,7 +652,9 @@ def create_app(
         value = resolved_clock()
         if not isinstance(value, datetime):
             raise RuntimeError("clock must return datetime")
-        return value
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
 
     def authenticated_user(request: Request) -> User:
         token = request.cookies.get(SESSION_COOKIE)

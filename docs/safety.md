@@ -46,6 +46,26 @@ The current code provides these demo-level controls:
 
 These controls do not amount to production security or privacy compliance. The prototype has no password or external identity lifecycle, CSRF token, encryption-at-rest policy, key rotation, retention/deletion policy, backup policy, rate limiting, or production audit export. Use a deployment secret manager, keep `CAREFLOW_SESSION_SECRET` out of source and images, and keep the local SQLite database out of version control. Do not load real or sensitive data into this demo.
 
+## SQLite recovery boundary
+
+Phase 2 adds a versioned, integrity-checked SQLite lifecycle, but it remains a
+single-host pilot control. Run `make migrate DB=careflow.db` before serving a
+legacy file, `make verify-db DB=careflow.db` after upgrades, and create a
+verified online snapshot with `make backup DB=careflow.db
+BACKUP=careflow.backup.sqlite`. Restore to a new path with `make restore
+BACKUP=careflow.backup.sqlite RESTORE_TARGET=careflow.restore.sqlite`; the
+restore command checks schema, foreign keys, SQLite integrity, pathway loading,
+case/audit continuity, consent, draft, and queued-outbox counts before it can be
+selected. Never replace the only live file in place, and protect backup files
+like the source database.
+
+The supported topology is one CareFlow process with one Uvicorn worker on one
+local writable filesystem. SQLite uses a bounded 5-second busy timeout and will
+not be made highly available by adding workers, replicas, or a network-mounted
+database. Persisted timestamps are UTC-aware ISO-8601 values with an explicit
+offset; legacy naive timestamps are interpreted as UTC. Consent expires at the
+exact `expires_at` boundary.
+
 Transition authorization is deliberately role-based in the current prototype: an authenticated user with the current state's owner role may submit the transition even when their user ID is different from the case's assigned owner ID. The owner field still drives assignment, worklist display, and invariant checks; production deployment would need an explicit identity-to-assignment policy if that distinction matters.
 
 ## Metrics and simulation limits

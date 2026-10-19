@@ -52,13 +52,13 @@ Requirements for the production-readiness pilot milestone. Each requirement is a
 
 ### Persistence and Recovery
 
-- [ ] **DATA-01**: A fresh or existing SQLite database reports a schema version and is upgraded through ordered, repeatable migrations without deleting existing case identifiers or audit history.
-- [ ] **DATA-02**: CareFlow refuses readiness when the database schema is behind, unsupported, partially migrated, unreadable, unwritable, or fails foreign-key or integrity checks.
-- [ ] **DATA-03**: Case state, audit history, evidence, approvals, consent decisions, access/security events, and outbox changes required by one mutation commit atomically or are not visible as a partial operation.
-- [ ] **DATA-04**: Database transactions use bounded lock/busy behavior and a documented one-process/worker pilot topology without claiming multi-host or high-availability SQLite support.
-- [ ] **DATA-05**: An operator can create a consistent online SQLite backup, verify its schema and integrity, and restore it to a new path without copying only an unsafe live main file.
-- [ ] **DATA-06**: The restore and upgrade runbook verifies cases, pathway loading, audit history, consent, drafts, outbox rows, and health before a restored database is served.
-- [ ] **DATA-07**: Persisted timestamps crossing API, engine, logs, migrations, and backups are UTC-aware or explicitly normalized, and boundary behavior is covered by deterministic tests.
+- [x] **DATA-01**: A fresh or existing SQLite database reports a schema version and is upgraded through ordered, repeatable migrations without deleting existing case identifiers or audit history.
+- [x] **DATA-02**: CareFlow refuses readiness when the database schema is behind, unsupported, partially migrated, unreadable, unwritable, or fails foreign-key or integrity checks.
+- [x] **DATA-03**: Case state, audit history, evidence, approvals, consent decisions, access/security events, and outbox changes required by one mutation commit atomically or are not visible as a partial operation.
+- [x] **DATA-04**: Database transactions use bounded lock/busy behavior and a documented one-process/worker pilot topology without claiming multi-host or high-availability SQLite support.
+- [x] **DATA-05**: An operator can create a consistent online SQLite backup, verify its schema and integrity, and restore it to a new path without copying only an unsafe live main file.
+- [x] **DATA-06**: The restore and upgrade runbook verifies cases, pathway loading, audit history, consent, drafts, outbox rows, and health before a restored database is served.
+- [x] **DATA-07**: Persisted timestamps crossing API, engine, logs, migrations, and backups are UTC-aware or explicitly normalized, and boundary behavior is covered by deterministic tests.
 
 ### Operations and Privacy
 
@@ -158,13 +158,13 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CASE-07 | Phase 4: Authorization, Case Integrity & Consent-Gated Messaging | Pending |
 | CASE-08 | Phase 4: Authorization, Case Integrity & Consent-Gated Messaging | Pending |
 | CASE-09 | Phase 4: Authorization, Case Integrity & Consent-Gated Messaging | Pending |
-| DATA-01 | Phase 2: SQLite Lifecycle & Recovery Foundation | Pending |
-| DATA-02 | Phase 2: SQLite Lifecycle & Recovery Foundation | Pending |
-| DATA-03 | Phase 2: SQLite Lifecycle & Recovery Foundation | Pending |
-| DATA-04 | Phase 2: SQLite Lifecycle & Recovery Foundation | Pending |
-| DATA-05 | Phase 2: SQLite Lifecycle & Recovery Foundation | Pending |
-| DATA-06 | Phase 2: SQLite Lifecycle & Recovery Foundation | Pending |
-| DATA-07 | Phase 2: SQLite Lifecycle & Recovery Foundation | Pending |
+| DATA-01 | Phase 2: SQLite Lifecycle & Recovery Foundation | Validated |
+| DATA-02 | Phase 2: SQLite Lifecycle & Recovery Foundation | Validated |
+| DATA-03 | Phase 2: SQLite Lifecycle & Recovery Foundation | Validated |
+| DATA-04 | Phase 2: SQLite Lifecycle & Recovery Foundation | Validated |
+| DATA-05 | Phase 2: SQLite Lifecycle & Recovery Foundation | Validated |
+| DATA-06 | Phase 2: SQLite Lifecycle & Recovery Foundation | Validated |
+| DATA-07 | Phase 2: SQLite Lifecycle & Recovery Foundation | Validated |
 | OPS-01 | Phase 5: Observability & Server-Rendered HTTP Safety | Pending |
 | OPS-02 | Phase 5: Observability & Server-Rendered HTTP Safety | Pending |
 | OPS-03 | Phase 5: Observability & Server-Rendered HTTP Safety | Pending |

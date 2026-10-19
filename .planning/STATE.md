@@ -5,18 +5,18 @@
 See: `.planning/PROJECT.md` (updated 2026-10-19)
 
 **Core value:** Patients and care teams can move a screening case safely from result to documented next action or closure, with every responsibility, permission, decision, and communication traceable.
-**Current focus:** Phase 2 — SQLite Lifecycle & Recovery Foundation
+**Current focus:** Phase 3 — Identity & Secure Session Boundary
 
 ## Current Position
 
-Phase: 1 of 7 (Contract Characterization & Fail-Closed Configuration)
-Plan: 1 of 1 in current phase
+Phase: 2 of 7 (SQLite Lifecycle & Recovery Foundation)
+Plan: Complete
 Status: Complete
-Last activity: 2026-10-19 — Added typed demo/pilot settings, safe health checks, and synthetic-only seed boundaries.
+Last activity: 2026-10-19 — Added ordered SQLite migrations, fail-closed readiness, UTC normalization, and verified online backup/restore commands.
 
-Progress: █░░░░░░░░░ 14%
-Roadmap progress: 1/7 phases complete; 5/54 requirements validated
-Next action: Plan Phase 2 — SQLite Lifecycle & Recovery Foundation.
+Progress: ██░░░░░░░░ 29%
+Roadmap progress: 2/7 phases complete; 12/54 requirements validated
+Next action: Plan Phase 3 — Identity & Secure Session Boundary.
 
 ## Performance Metrics
 
@@ -31,7 +31,7 @@ Next action: Plan Phase 2 — SQLite Lifecycle & Recovery Foundation.
 |-------|-------|-------|----------|
 | 1–7 | 0 | TBD | N/A |
 
-**Baseline:** The current local test baseline is 44 passing. Clean Linux/Docker verification remains pending and is a release-gate concern.
+**Baseline:** The current local test baseline is 52 passing. Clean Linux/Docker verification remains pending and is a release-gate concern.
 
 ## Accumulated Context
 

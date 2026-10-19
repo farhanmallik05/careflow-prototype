@@ -10,13 +10,34 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import hashlib
 import json
+import os
 from pathlib import Path
 import sqlite3
-from typing import Any, Mapping
+import threading
+from typing import Any, Callable, Mapping
 from uuid import uuid4
 
 from careflow.engine import Case, Pathway
+
+
+CURRENT_SCHEMA_VERSION = 2
+SCHEMA_VERSION = CURRENT_SCHEMA_VERSION
+SQLITE_BUSY_TIMEOUT_MS = 5_000
+SQLITE_BUSY_TIMEOUT_SECONDS = SQLITE_BUSY_TIMEOUT_MS / 1_000
+
+
+class DatabaseLifecycleError(RuntimeError):
+    """Raised when a SQLite database cannot safely be used by this release."""
+
+
+class UnsupportedSchemaError(DatabaseLifecycleError):
+    """Raised when a database is newer than the application understands."""
+
+
+class DatabaseIntegrityError(DatabaseLifecycleError):
+    """Raised when SQLite or application-level integrity checks fail."""
 
 
 SCHEMA = """
@@ -145,6 +166,72 @@ CREATE INDEX IF NOT EXISTS idx_access_case ON access_logs(case_id, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_access_user ON access_logs(user_id, occurred_at);
 """
 
+MIGRATION_METADATA_SCHEMA = """
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    checksum TEXT NOT NULL,
+    applied_at TEXT NOT NULL
+);
+"""
+
+MIGRATION_RUNTIME_METADATA = """
+CREATE TABLE IF NOT EXISTS database_metadata (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+INSERT INTO database_metadata (key, value)
+VALUES ('timestamp_convention', 'UTC-aware ISO-8601 values')
+ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+INSERT INTO database_metadata (key, value)
+VALUES ('topology', 'one-process-one-worker-local-filesystem')
+ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+"""
+
+
+@dataclass(frozen=True)
+class _Migration:
+    version: int
+    name: str
+    sql: str
+    apply: Callable[[sqlite3.Connection], None]
+
+    @property
+    def checksum(self) -> str:
+        return hashlib.sha256(self.sql.encode("utf-8")).hexdigest()
+
+
+def _apply_baseline(connection: sqlite3.Connection) -> None:
+    for statement in (SCHEMA + MIGRATION_METADATA_SCHEMA).split(";"):
+        if statement.strip():
+            connection.execute(statement)
+
+
+def _apply_runtime_metadata(connection: sqlite3.Connection) -> None:
+    for statement in MIGRATION_RUNTIME_METADATA.split(";"):
+        if statement.strip():
+            connection.execute(statement)
+
+
+MIGRATIONS = (
+    _Migration(1, "baseline-careflow-schema", SCHEMA + MIGRATION_METADATA_SCHEMA, _apply_baseline),
+    _Migration(2, "runtime-lifecycle-metadata", MIGRATION_RUNTIME_METADATA, _apply_runtime_metadata),
+)
+MIGRATIONS_BY_VERSION = {migration.version: migration for migration in MIGRATIONS}
+LEGACY_TABLES = frozenset(
+    {
+        "users",
+        "cases",
+        "consents",
+        "evidence",
+        "approvals",
+        "audit_events",
+        "notification_outbox",
+        "message_drafts",
+        "access_logs",
+    }
+)
+
 USER_ROLES = frozenset(
     {
         "lab",
@@ -247,14 +334,20 @@ class AccessLog:
 
 def _datetime(value: datetime | str | None) -> datetime:
     if isinstance(value, datetime):
-        return value
-    if isinstance(value, str):
-        return datetime.fromisoformat(value)
-    raise TypeError("a datetime or ISO datetime string is required")
+        parsed = value
+    elif isinstance(value, str):
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    else:
+        raise TypeError("a datetime or ISO datetime string is required")
+    return _instant(parsed)
 
 
 def _instant(value: datetime) -> datetime:
-    """Normalize naive and timezone-aware timestamps for safe comparisons."""
+    """Normalize naive and timezone-aware timestamps to UTC-aware values.
+
+    Legacy databases stored naive values.  They are interpreted as UTC during
+    upgrade/rehydration so ordering and expiry checks remain deterministic.
+    """
 
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
@@ -287,6 +380,8 @@ class SQLiteStore:
     """
 
     TABLES = {
+        "schema_migrations",
+        "database_metadata",
         "users",
         "cases",
         "consents",
@@ -298,8 +393,10 @@ class SQLiteStore:
         "access_logs",
     }
 
-    def __init__(self, path: str | Path = "careflow.db") -> None:
+    def __init__(self, path: str | Path = "careflow.db", *, auto_migrate: bool = True) -> None:
         self.path = str(path)
+        self._lock = threading.RLock()
+        self.startup_error: DatabaseLifecycleError | None = None
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         # FastAPI's synchronous TestClient and request handlers may run on a
@@ -307,16 +404,186 @@ class SQLiteStore:
         # The store still owns one connection and serializes writes with
         # SQLite transactions, so allowing that connection to cross the
         # request boundary keeps the existing :memory: fixture useful too.
-        self.connection = sqlite3.connect(self.path, check_same_thread=False)
+        self.connection = sqlite3.connect(
+            self.path,
+            check_same_thread=False,
+            timeout=SQLITE_BUSY_TIMEOUT_SECONDS,
+        )
         self.connection.row_factory = sqlite3.Row
-        self.connection.execute("PRAGMA foreign_keys = ON")
-        self.initialize()
+        try:
+            self.connection.execute("PRAGMA foreign_keys = ON")
+            self.connection.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+            self.connection.execute("PRAGMA synchronous = FULL")
+        except sqlite3.DatabaseError as exc:
+            self.startup_error = DatabaseLifecycleError(f"database connection is unreadable: {exc}")
+            return
+        if auto_migrate:
+            try:
+                self.initialize()
+            except DatabaseLifecycleError as exc:
+                self.startup_error = exc
+            except sqlite3.DatabaseError as exc:
+                self.startup_error = DatabaseLifecycleError(f"database initialization failed: {exc}")
 
     def initialize(self) -> None:
-        """Create the current schema without changing existing records."""
+        """Create or upgrade the schema through ordered, forward-only migrations."""
 
-        self.connection.executescript(SCHEMA)
-        self.connection.commit()
+        with self._lock:
+            self._run_migrations()
+            self._validate_schema_contract()
+
+    @property
+    def schema_version(self) -> int:
+        row = self.connection.execute("PRAGMA user_version").fetchone()
+        return int(row[0]) if row is not None else 0
+
+    def migration_status(self) -> dict[str, int | bool]:
+        """Return safe schema revision information for operators and probes."""
+
+        return {
+            "version": self.schema_version,
+            "supported_version": CURRENT_SCHEMA_VERSION,
+            "current": self.schema_version == CURRENT_SCHEMA_VERSION,
+        }
+
+    def _table_names(self) -> set[str]:
+        rows = self.connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+        return {str(row[0]) for row in rows}
+
+    def _validate_schema_contract(self) -> None:
+        version = self.schema_version
+        if version > CURRENT_SCHEMA_VERSION:
+            raise UnsupportedSchemaError(
+                f"database schema version {version} is newer than supported version {CURRENT_SCHEMA_VERSION}"
+            )
+        if version < CURRENT_SCHEMA_VERSION:
+            raise DatabaseLifecycleError(
+                f"database schema version {version} is behind supported version {CURRENT_SCHEMA_VERSION}"
+            )
+        missing = (LEGACY_TABLES | {"schema_migrations", "database_metadata"}) - self._table_names()
+        if missing:
+            raise DatabaseLifecycleError("database schema is missing required tables")
+        rows = self.connection.execute(
+            "SELECT version, name, checksum FROM schema_migrations ORDER BY version"
+        ).fetchall()
+        if [int(row[0]) for row in rows] != sorted(MIGRATIONS_BY_VERSION):
+            raise DatabaseLifecycleError("database migration history is incomplete")
+        for row in rows:
+            migration = MIGRATIONS_BY_VERSION[int(row[0])]
+            if row[1] != migration.name or row[2] != migration.checksum:
+                raise DatabaseLifecycleError("database migration history does not match this release")
+
+    def _record_migration(self, migration: _Migration) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO schema_migrations (version, name, checksum, applied_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (migration.version, migration.name, migration.checksum, _iso(datetime.now(timezone.utc))),
+        )
+
+    def _legacy_baseline_present(self) -> bool:
+        tables = self._table_names()
+        return LEGACY_TABLES.issubset(tables) and "schema_migrations" not in tables
+
+    def _run_migrations(self) -> None:
+        version = self.schema_version
+        tables = self._table_names()
+        if version > CURRENT_SCHEMA_VERSION:
+            raise UnsupportedSchemaError(
+                f"database schema version {version} is newer than supported version {CURRENT_SCHEMA_VERSION}"
+            )
+
+        if version == 0 and not tables:
+            pass
+        elif version == 0 and self._legacy_baseline_present():
+            migration = MIGRATIONS_BY_VERSION[1]
+            with self.connection:
+                self.connection.execute("BEGIN IMMEDIATE")
+                self.connection.execute(MIGRATION_METADATA_SCHEMA.split(";")[0])
+                self._record_migration(migration)
+                self.connection.execute("PRAGMA user_version = 1")
+            version = 1
+        elif version == 0 and "schema_migrations" in tables:
+            raise DatabaseLifecycleError("database migration appears partially applied")
+        elif version == 0:
+            raise DatabaseLifecycleError("database contains an unrecognized or partial schema")
+        else:
+            rows = self.connection.execute(
+                "SELECT version, name, checksum FROM schema_migrations ORDER BY version"
+            ).fetchall()
+            recorded = [int(row[0]) for row in rows]
+            if recorded != list(range(1, version + 1)):
+                raise DatabaseLifecycleError("database migration history is incomplete")
+            for row in rows:
+                migration = MIGRATIONS_BY_VERSION.get(int(row[0]))
+                if migration is None or row[1] != migration.name or row[2] != migration.checksum:
+                    raise DatabaseLifecycleError("database migration history does not match this release")
+
+        for migration in MIGRATIONS:
+            if migration.version <= version:
+                continue
+            with self.connection:
+                self.connection.execute("BEGIN IMMEDIATE")
+                migration.apply(self.connection)
+                self._record_migration(migration)
+                self.connection.execute(f"PRAGMA user_version = {migration.version}")
+            version = migration.version
+
+        self._validate_schema_contract()
+
+    def verify_integrity(self) -> None:
+        """Run SQLite integrity and foreign-key checks without changing data."""
+
+        if self.startup_error is not None:
+            raise self.startup_error
+        integrity = self.connection.execute("PRAGMA integrity_check").fetchone()
+        if integrity is None or integrity[0] != "ok":
+            raise DatabaseIntegrityError("database integrity check failed")
+        foreign_keys = self.connection.execute("PRAGMA foreign_key_check").fetchall()
+        if foreign_keys:
+            raise DatabaseIntegrityError("database foreign-key check failed")
+
+    def check_writable_path(self) -> None:
+        """Verify the database file and its parent can accept a write probe."""
+
+        if self.path == ":memory:":
+            return
+        database_path = Path(self.path).expanduser()
+        parent = database_path.resolve().parent
+        if not parent.exists() or not os.access(parent, os.W_OK):
+            raise DatabaseLifecycleError("database directory is not writable")
+        if database_path.exists() and not os.access(database_path, os.W_OK):
+            raise DatabaseLifecycleError("database file is not writable")
+        probe = parent / f".careflow-write-probe-{uuid4().hex}"
+        try:
+            with probe.open("xb"):
+                pass
+        except OSError as exc:
+            raise DatabaseLifecycleError("database directory is not writable") from exc
+        finally:
+            try:
+                probe.unlink()
+            except FileNotFoundError:
+                pass
+
+    def verify_readiness(self) -> None:
+        """Fail closed unless schema, storage, SQLite, and app-level data are ready."""
+
+        if self.startup_error is not None:
+            raise self.startup_error
+        self._validate_schema_contract()
+        self.verify_integrity()
+        self.check_writable_path()
+
+    def verify_cases(self, pathway: Pathway) -> None:
+        """Validate every persisted case against its pathway and audit contract."""
+
+        self.verify_readiness()
+        for record in self.list_case_records():
+            self.load_case(str(record["id"]), pathway)
 
     def close(self) -> None:
         self.connection.close()
@@ -851,9 +1118,13 @@ class SQLiteStore:
     def load_case(self, case_id: str, pathway: Pathway) -> Case:
         """Rehydrate a case without replaying transitions or bypassing rules."""
 
+        if self.startup_error is not None:
+            raise self.startup_error
         row = self.connection.execute("SELECT * FROM cases WHERE id = ?", (case_id,)).fetchone()
         if row is None:
             raise KeyError(f"case not found: {case_id}")
+        if row["pathway"] != pathway.name:
+            raise ValueError(f"persisted case belongs to pathway {row['pathway']!r}, not {pathway.name!r}")
         case = Case(row["id"], pathway, _datetime(row["created_at"]), urgent=bool(row["urgent"]))
         case.state = row["state"]
         case.entered = _datetime(row["entered_at"])
@@ -865,10 +1136,17 @@ class SQLiteStore:
             raise ValueError("persisted closed case has an owner")
         if not case.closed and not case.owner:
             raise ValueError("persisted open case has no owner")
+        if bool(row["closed"]) != case.closed:
+            raise ValueError("persisted case closed flag does not match its state")
 
         events = self.connection.execute(
             "SELECT * FROM audit_events WHERE case_id = ? ORDER BY sequence", (case_id,)
         ).fetchall()
+        if not events:
+            raise ValueError("persisted case has no audit history")
+        sequences = [int(event_row["sequence"]) for event_row in events]
+        if sequences != list(range(len(sequences))):
+            raise ValueError("persisted case audit sequence is not contiguous")
         case.audit = []
         for event_row in events:
             event: dict[str, Any] = {

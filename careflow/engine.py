@@ -1,6 +1,17 @@
 """CareFlow engine: pathway-driven case orchestration with human-governed closure."""
+from datetime import datetime, timezone
 from pathlib import Path
 import yaml
+
+
+def _utc(value):
+    """Normalize domain timestamps to timezone-aware UTC values."""
+
+    if not isinstance(value, datetime):
+        raise TypeError("case timestamps must be datetime values")
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 class TransitionError(Exception):
     pass
@@ -30,12 +41,13 @@ class Pathway:
 class Case:
     def __init__(self, cid, pathway, now, urgent=False, *, owner=None, actor="system"):
         self.id, self.pw, self.urgent = cid, pathway, urgent
+        now = _utc(now)
         self.state, self.entered, self.audit, self.evidence = pathway.start, now, [], set()
         self.owner = pathway.states[self.state]["owner"] if owner is None else owner
         self._log(now, actor, "open", None, self.state)
 
     def _log(self, ts, actor, action, frm, to, **kw):
-        self.audit.append({"ts": ts, "actor": actor, "action": action, "from": frm, "to": to, **kw})
+        self.audit.append({"ts": _utc(ts), "actor": actor, "action": action, "from": frm, "to": to, **kw})
 
     @property
     def closed(self):
@@ -52,6 +64,7 @@ class Case:
     def transition(self, action, actor, now, evidence=(), approval=None, *, actor_role=None, next_owner=None):
         """Move the case. Missing evidence is only waived by a documented approval
         from an authorized human role. AI components never call this with approval."""
+        now = _utc(now)
         if self.closed:
             raise TransitionError("case is closed")
         t = self.pw.states[self.state]["next"].get(action)
@@ -77,7 +90,7 @@ class Case:
         self._log(now, actor, action, frm, self.state, evidence=sorted(evidence), approval=approval)
 
 def hours(a, b):
-    return (b - a).total_seconds() / 3600
+    return (_utc(b) - _utc(a)).total_seconds() / 3600
 
 def explain(case, now):
     """What needs to happen next, who owns it, and what evidence is needed."""

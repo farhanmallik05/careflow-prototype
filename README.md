@@ -79,6 +79,51 @@ make test
 
 `make test` is the one canonical test command and runs `python -m pytest -q`. The tests use temporary SQLite databases and deterministic clocks/seeds; after the lockfile installation they do not call a network service. `python -m pytest -q` is the underlying diagnostic command, but `make test` is the reproducibility contract.
 
+## SQLite lifecycle, readiness, and recovery
+
+The runtime database uses ordered SQLite migrations and reports its revision via
+`PRAGMA user_version` plus the `schema_migrations` table. A fresh database is
+created at the current revision; a legacy database created by the pre-Phase-2
+schema is recognized as the baseline and upgraded without deleting case IDs,
+audit history, consent rows, drafts, or outbox rows. Migration history is
+forward-only and repeatable. A database with an incomplete, unsupported, or
+behind revision, failed foreign-key/integrity checks, or an unwritable path is
+not ready to serve.
+
+Run the lifecycle checks from the project root:
+
+```bash
+# Create or upgrade one database, then verify schema, pathway, and case history.
+make migrate DB=careflow.db
+make verify-db DB=careflow.db
+
+# Create an online backup using sqlite3.Connection.backup, then reopen and verify it.
+make backup DB=careflow.db BACKUP=careflow.backup.sqlite
+
+# Restore only into a new path; the command verifies counts, schema, integrity,
+# pathway loading, cases, audit history, consents, access logs, drafts, and outbox rows first.
+make restore BACKUP=careflow.backup.sqlite RESTORE_TARGET=careflow.restore.sqlite
+```
+
+The equivalent CLI is `python -m careflow.ops {migrate,verify,backup,restore}`;
+`python -m careflow.ops --help` shows the exact arguments. Backup files are
+application data and must be protected by the operator. Keep the database,
+SQLite journal/WAL sidecars, and backup destination on a local writable
+filesystem, and stop/drain the service before selecting a restored file.
+
+CareFlow's supported SQLite topology is **one process and one Uvicorn worker on
+one host**. Connections enable foreign keys, full synchronous writes, and a
+bounded 5-second busy timeout; persistent lock contention is an operational
+failure rather than a reason to add workers or replicas. SQLite on a shared
+network filesystem, multiple workers, multi-host writes, and high availability
+are not supported by this pilot.
+
+Persisted timestamps are normalized to timezone-aware UTC values and serialized
+as ISO-8601 values with an explicit `+00:00` offset. Legacy naive timestamps
+are interpreted as UTC during rehydration so consent expiry, SLA boundaries,
+audit ordering, migrations, and backup verification use one deterministic
+convention. Consent is invalid exactly at its `expires_at` instant.
+
 ## Docker and deployment
 
 The `Dockerfile` uses the immutable `python:3.12.12-slim` image digest, installs exactly `requirements.lock`, copies only the runtime package, runs as the non-root `careflow` user, and serves Uvicorn on `0.0.0.0:8000`. It declares `/data` as the SQLite volume and seeds `/data/careflow.db` only when the volume is empty. The image healthcheck verifies that the seeded landing page is available. `.dockerignore` excludes local databases, development files, planning artifacts, and environment files from the build context.

@@ -74,6 +74,35 @@ The pathway allows `clinician_on_call` and `care_coordinator` to submit a matchi
 
 `save_case` rejects an unknown state, an open case without an owner, or a closed case with an owner before writing. `load_case` rehydrates the stored audit/evidence rather than replaying transitions. The audit is therefore the source used by `careflow.metrics.compute_metrics` for observed measures.
 
+### SQLite lifecycle and recovery
+
+`SQLiteStore` applies numbered, forward-only migrations under `BEGIN IMMEDIATE`.
+The baseline migration records the existing pre-versioned schema without
+rewriting its rows; the current lifecycle metadata migration records the UTC
+timestamp convention and supported one-process/one-worker topology. Revision
+history is stored in `schema_migrations` and mirrored in `PRAGMA user_version`.
+Migration checksums make edited or incomplete history fail closed. The store
+uses a 5-second busy timeout, `foreign_keys=ON`, and `synchronous=FULL`.
+
+Readiness runs the supported-revision check, migration-history check,
+`PRAGMA integrity_check`, `PRAGMA foreign_key_check`, and a filesystem write
+probe. The app does not report ready for a behind, future, partial, corrupt,
+foreign-key-invalid, or unwritable database. Operators use `python -m
+careflow.ops migrate` before serving a legacy file and `verify` after upgrades.
+
+Backups use SQLite's online `Connection.backup()` API rather than copying a live
+main file. The destination is written to a temporary path, verified, then
+atomically renamed. `restore` requires a new target path and verifies the
+schema, pathway loading, every case audit, and counts for cases, audits,
+consents, access logs, message drafts, and the local notification outbox before the restored
+file is selected. No recovery command sends a notification or changes pathway
+state.
+
+All timestamps crossing the engine/repository boundary are timezone-aware UTC;
+legacy naive values are interpreted as UTC and persisted with an explicit
+`+00:00` offset. Consent expiry is exclusive: a check at exactly `expires_at`
+is not valid.
+
 ## Message and outbox flow
 
 ```text
