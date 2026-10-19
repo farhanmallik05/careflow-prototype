@@ -5,18 +5,18 @@
 See: `.planning/PROJECT.md` (updated 2026-10-19)
 
 **Core value:** Patients and care teams can move a screening case safely from result to documented next action or closure, with every responsibility, permission, decision, and communication traceable.
-**Current focus:** Phase 1 — Contract Characterization & Fail-Closed Configuration
+**Current focus:** Phase 2 — SQLite Lifecycle & Recovery Foundation
 
 ## Current Position
 
 Phase: 1 of 7 (Contract Characterization & Fail-Closed Configuration)
-Plan: 0 of TBD in current phase
-Status: Ready to plan
-Last activity: 2026-10-19 — Initialized the seven-phase production-readiness roadmap, state, and requirement traceability.
+Plan: 1 of 1 in current phase
+Status: Complete
+Last activity: 2026-10-19 — Added typed demo/pilot settings, safe health checks, and synthetic-only seed boundaries.
 
-Progress: ░░░░░░░░░░ 0%
-Roadmap progress: 0/7 phases complete; 0/54 requirements validated
-Next action: Run `/gsd-plan-phase 1` after reviewing the phase boundary and its contract-characterization assumptions.
+Progress: █░░░░░░░░░ 14%
+Roadmap progress: 1/7 phases complete; 5/54 requirements validated
+Next action: Plan Phase 2 — SQLite Lifecycle & Recovery Foundation.
 
 ## Performance Metrics
 
@@ -31,7 +31,7 @@ Next action: Run `/gsd-plan-phase 1` after reviewing the phase boundary and its 
 |-------|-------|-------|----------|
 | 1–7 | 0 | TBD | N/A |
 
-**Baseline:** The existing local test baseline is 39 passing. Clean Linux/Docker verification remains pending and is a release-gate concern.
+**Baseline:** The current local test baseline is 44 passing. Clean Linux/Docker verification remains pending and is a release-gate concern.
 
 ## Accumulated Context
 

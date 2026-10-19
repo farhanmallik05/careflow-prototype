@@ -9,11 +9,11 @@ Requirements for the production-readiness pilot milestone. Each requirement is a
 
 ### Configuration and Reproducibility
 
-- [ ] **CONF-01**: An operator can start CareFlow in an explicit `demo` or `pilot` mode, and the selected mode is visible in safe startup/readiness diagnostics.
-- [ ] **CONF-02**: Pilot mode refuses to serve protected functionality when required OIDC, session, trusted-origin, or data-path configuration is missing or unsafe.
-- [ ] **CONF-03**: The application accepts one canonical, typed configuration surface for runtime, database, session, OIDC, logging, and synthetic-data settings, with placeholder-only values in `.env.example`.
-- [ ] **CONF-04**: A clean checkout can install the pinned Python runtime dependencies without global packages, absolute machine paths, network-only test fixtures, or committed secrets.
-- [ ] **CONF-05**: Demo seed/reset behavior is unavailable against a declared pilot data path, and the runtime displays an unambiguous synthetic-data-only boundary.
+- [x] **CONF-01**: An operator can start CareFlow in an explicit `demo` or `pilot` mode, and the selected mode is visible in safe startup/readiness diagnostics.
+- [x] **CONF-02**: Pilot mode refuses to serve protected functionality when required OIDC, session, trusted-origin, or data-path configuration is missing or unsafe.
+- [x] **CONF-03**: The application accepts one canonical, typed configuration surface for runtime, database, session, OIDC, logging, and synthetic-data settings, with placeholder-only values in `.env.example`.
+- [x] **CONF-04**: A clean checkout can install the pinned Python runtime dependencies without global packages, absolute machine paths, network-only test fixtures, or committed secrets.
+- [x] **CONF-05**: Demo seed/reset behavior is unavailable against a declared pilot data path, and the runtime displays an unambiguous synthetic-data-only boundary.
 
 ### Identity and Sessions
 

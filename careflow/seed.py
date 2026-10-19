@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timedelta
 import json
+import os
 from pathlib import Path
 from typing import Iterable
 
@@ -130,8 +131,13 @@ def seed_demo(
     *,
     now: datetime = DEMO_NOW,
     reset: bool = True,
+    mode: str | None = None,
 ) -> dict[str, int]:
     """Create exactly 40 deterministic demo cases and supporting records."""
+
+    selected_mode = (mode or os.getenv("CAREFLOW_MODE", "demo")).strip().lower()
+    if selected_mode != "demo":
+        raise RuntimeError("demo seed/reset is unavailable outside CAREFLOW_MODE=demo")
 
     pathway = Pathway.load(PATHWAY_FILE)
     with SQLiteStore(db_path) as store:
@@ -205,8 +211,9 @@ def seed_demo(
 def main(argv: Iterable[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Create synthetic CareFlow demo data")
     parser.add_argument("--db", default="careflow.db", help="SQLite database path")
+    parser.add_argument("--mode", choices=("demo", "pilot"), default=None)
     args = parser.parse_args(list(argv) if argv is not None else None)
-    print(json.dumps(seed_demo(args.db), sort_keys=True))
+    print(json.dumps(seed_demo(args.db, mode=args.mode), sort_keys=True))
 
 
 if __name__ == "__main__":

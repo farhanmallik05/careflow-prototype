@@ -1,10 +1,10 @@
 {% extends "base.html" %}
 
-{% block title %}CareFlow demo login{% endblock %}
+{% block title %}CareFlow · {{ mode|title }} mode{% endblock %}
 
 {% block content %}
   <section class="hero" aria-labelledby="landing-title">
-    <p class="eyebrow">Pathway operations</p>
+    <p class="eyebrow">{{ mode|title }} mode · synthetic data only</p>
     <h1 id="landing-title">Keep every care journey moving.</h1>
     <p class="lede">CareFlow makes the next responsible action, evidence, and audit trail visible across a screening-to-care pathway.</p>
     {% if user %}
@@ -18,13 +18,18 @@
       </div>
     {% else %}
       <div class="callout">
-        <strong>Choose a synthetic demo user to continue.</strong>
-        <span>No password or external account is used for this local prototype.</span>
+        {% if mode == 'demo' %}
+          <strong>Choose a synthetic demo user to continue.</strong>
+          <span>No password or external account is used for this local prototype.</span>
+        {% else %}
+          <strong>Pilot identity is managed by the configured OIDC provider.</strong>
+          <span>Demo login is disabled. No clinical or patient data is displayed here.</span>
+        {% endif %}
       </div>
     {% endif %}
   </section>
 
-  <section aria-labelledby="demo-users-title">
+  {% if mode == 'demo' %}<section aria-labelledby="demo-users-title">
     <div class="section-heading">
       <div>
         <p class="eyebrow">Click-through demo</p>
@@ -47,7 +52,7 @@
         </div>
       {% endfor %}
     </div>
-  </section>
+  </section>{% endif %}
 
   <section class="info-grid" aria-label="Dashboard areas">
     <article class="card">

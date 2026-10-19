@@ -21,7 +21,7 @@ The sequence intentionally follows the dependency graph: configuration and exist
 - Integer phases (1, 2, 3): planned milestone work
 - Decimal phases (2.1, 2.2): urgent insertions, if later required
 
-- [ ] **Phase 1: Contract Characterization & Fail-Closed Configuration** - Establish the current contract and make demo, pilot, configuration, and synthetic-data boundaries explicit.
+- [x] **Phase 1: Contract Characterization & Fail-Closed Configuration** - Establish the current contract and make demo, pilot, configuration, and synthetic-data boundaries explicit.
 - [ ] **Phase 2: SQLite Lifecycle & Recovery Foundation** - Version, validate, transact, back up, and restore the pilot database safely.
 - [ ] **Phase 3: Identity & Secure Session Boundary** - Authenticate through managed OIDC and issue revocable, server-managed local sessions.
 - [ ] **Phase 4: Authorization, Case Integrity & Consent-Gated Messaging** - Enforce relationship scope and bind every consequential case and messaging action to verified authority.
@@ -155,7 +155,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Contract Characterization & Fail-Closed Configuration | 0/TBD | Not started | - |
+| 1. Contract Characterization & Fail-Closed Configuration | 1/1 | Complete | 2026-10-19 |
 | 2. SQLite Lifecycle & Recovery Foundation | 0/TBD | Not started | - |
 | 3. Identity & Secure Session Boundary | 0/TBD | Not started | - |
 | 4. Authorization, Case Integrity & Consent-Gated Messaging | 0/TBD | Not started | - |

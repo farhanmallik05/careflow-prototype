@@ -31,12 +31,22 @@ py -3.12.12 -m venv .venv
 python -m pip install --requirement requirements.lock
 ```
 
-The application reads configuration from the process environment; `.env.example` documents the variable names but is not loaded automatically. For a local run, set a fresh session secret and keep it outside the repository:
+The application reads configuration from the process environment; `.env.example` documents the typed settings but is not loaded automatically. `CAREFLOW_MODE=demo` is the explicit local/judge mode. `CAREFLOW_MODE=pilot` fails closed unless OIDC, trusted-origin, session, and synthetic-only settings are present; the current phase reserves the OIDC verification callback for the identity phase. For a local run, set a fresh session secret and keep it outside the repository:
 
 ```bash
 export CAREFLOW_SESSION_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export CAREFLOW_MODE=demo
+export CAREFLOW_SYNTHETIC_ONLY=true
+export CAREFLOW_ALLOW_DEMO_LOGIN=true
 export CAREFLOW_SESSION_MAX_AGE=3600
 export CAREFLOW_MESSAGE_PROVIDER=rule_based
+```
+
+Safe diagnostics are available without case or secret data:
+
+```bash
+curl -sS http://127.0.0.1:8000/health/live
+curl -sS http://127.0.0.1:8000/health/ready
 ```
 
 `CAREFLOW_SESSION_SECRET` signs the `careflow_session` cookie. The default session lifetime is 3,600 seconds. `rule_based` is the deterministic, offline message provider used by tests and demos.

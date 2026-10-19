@@ -35,6 +35,7 @@ from careflow.ai import (
     normalize_language,
     normalize_template,
 )
+from careflow.config import CareFlowSettings, ConfigurationError
 from careflow.engine import Case, Pathway, TransitionError, explain, worklist
 from careflow.metrics import compute_metrics
 from careflow.persistence import MessageDraftRecord, SQLiteStore, User
@@ -539,6 +540,7 @@ def create_app(
     session_secret: str | None = None,
     session_max_age: int | None = None,
     message_provider: AIProvider | None = None,
+    settings: CareFlowSettings | None = None,
 ) -> FastAPI:
     """Build an isolated CareFlow API application.
 
@@ -547,21 +549,26 @@ def create_app(
     pathway without patching module globals.
     """
 
+    resolved_settings = settings or CareFlowSettings.from_env()
+    resolved_settings.validate()
     resolved_pathway = _resolve_pathway(pathway)
     resolved_clock = _clock_factory(clock)
-    store = SQLiteStore(db_path)
+    resolved_db_path = (
+        resolved_settings.database_path
+        if str(db_path) == "careflow.db" and settings is not None
+        else db_path
+    )
+    store = SQLiteStore(resolved_db_path)
     resolved_session_secret = (
         session_secret
-        or os.getenv("CAREFLOW_SESSION_SECRET")
-        or os.getenv("SESSION_SECRET")
-        or secrets.token_urlsafe(32)
+        or resolved_settings.session_secret
+        or (secrets.token_urlsafe(32) if resolved_settings.demo_mode else "")
     )
     resolved_session_max_age = session_max_age
     if resolved_session_max_age is None:
-        raw_max_age = os.getenv("CAREFLOW_SESSION_MAX_AGE") or os.getenv("SESSION_MAX_AGE")
-        resolved_session_max_age = int(raw_max_age) if raw_max_age else DEFAULT_SESSION_MAX_AGE
+        resolved_session_max_age = resolved_settings.session_max_age or DEFAULT_SESSION_MAX_AGE
     if not resolved_session_secret:
-        raise ValueError("CAREFLOW_SESSION_SECRET must not be blank")
+        raise ConfigurationError("CAREFLOW_SESSION_SECRET must not be blank")
     if resolved_session_max_age <= 0:
         raise ValueError("session_max_age must be positive")
     signer = URLSafeTimedSerializer(resolved_session_secret, salt=SESSION_SALT)
@@ -579,9 +586,38 @@ def create_app(
     app.state.session_secret = resolved_session_secret
     app.state.session_max_age = resolved_session_max_age
     app.state.session_cookie = SESSION_COOKIE
+    app.state.settings = resolved_settings
+    app.state.mode = resolved_settings.mode
+    app.state.safe_diagnostics = resolved_settings.safe_diagnostics()
     app.state.message_provider = resolved_message_provider
     app.state.ai_provider = resolved_message_provider
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+    @app.get("/health/live", include_in_schema=False)
+    def health_live() -> dict[str, Any]:
+        return {"status": "ok", "mode": resolved_settings.mode}
+
+    @app.get("/health/ready", include_in_schema=False)
+    def health_ready() -> Response:
+        checks: dict[str, Any] = {
+            "mode": resolved_settings.mode,
+            "configuration": "ok",
+            "pathway": "ok",
+            "database": "ok",
+            "writable_storage": "ok",
+        }
+        try:
+            result = store.connection.execute("PRAGMA quick_check").fetchone()[0]
+            if result != "ok":
+                raise RuntimeError("database integrity check failed")
+            parent = Path(str(resolved_db_path)).expanduser().resolve().parent
+            if not parent.exists() or not os.access(parent, os.W_OK):
+                raise RuntimeError("database directory is not writable")
+        except Exception as exc:
+            checks["database"] = "failed"
+            checks["detail"] = str(exc)
+            return JSONResponse(status_code=503, content={"status": "not_ready", "checks": checks})
+        return JSONResponse(status_code=200, content={"status": "ready", "checks": checks})
 
     @app.exception_handler(TransitionError)
     async def transition_error_handler(_: Any, exc: TransitionError) -> JSONResponse:
@@ -729,24 +765,30 @@ def create_app(
         except HTTPException:
             user = None
         demo_links = []
-        for demo_user in store.list_users(active_only=True):
-            if not demo_user.id.startswith("demo-"):
-                continue
-            target = (
-                f"/patient/{quote(demo_user.id, safe='')}"
-                if demo_user.role == "patient"
-                else "/worklist"
-            )
-            demo_links.append(
-                {
-                    "id": demo_user.id,
-                    "name": demo_user.name,
-                    "role": _label(demo_user.role),
-                    "login_url": f"/demo-login/{quote(demo_user.id, safe='')}",
-                    "target": target,
-                }
-            )
-        return {"user": user, "demo_links": demo_links}
+        if resolved_settings.demo_mode and resolved_settings.allow_demo_login:
+            for demo_user in store.list_users(active_only=True):
+                if not demo_user.id.startswith("demo-"):
+                    continue
+                target = (
+                    f"/patient/{quote(demo_user.id, safe='')}"
+                    if demo_user.role == "patient"
+                    else "/worklist"
+                )
+                demo_links.append(
+                    {
+                        "id": demo_user.id,
+                        "name": demo_user.name,
+                        "role": _label(demo_user.role),
+                        "login_url": f"/demo-login/{quote(demo_user.id, safe='')}",
+                        "target": target,
+                    }
+                )
+        return {
+            "user": user,
+            "demo_links": demo_links,
+            "mode": resolved_settings.mode,
+            "synthetic_only": resolved_settings.synthetic_only,
+        }
 
     @app.get("/", status_code=200, include_in_schema=False)
     @app.get("/login", status_code=200, include_in_schema=False)
@@ -759,6 +801,8 @@ def create_app(
 
     @app.get("/demo-login/{user_id}", status_code=303, include_in_schema=False)
     def demo_login(user_id: str) -> Response:
+        if not resolved_settings.demo_mode or not resolved_settings.allow_demo_login:
+            raise HTTPException(status_code=404, detail="demo login is disabled in pilot mode")
         if not user_id.startswith("demo-"):
             raise HTTPException(status_code=404, detail="demo user not found")
         user = store.get_user(user_id)
@@ -772,6 +816,8 @@ def create_app(
     @app.post("/auth/login", status_code=200)
     @app.post("/login", status_code=200, include_in_schema=False)
     def login(request: LoginInput, response: Response) -> dict[str, Any]:
+        if not resolved_settings.demo_mode:
+            raise HTTPException(status_code=503, detail="pilot login requires the configured OIDC flow")
         user = store.get_user(request.identifier)
         if user is None or not user.is_active:
             raise HTTPException(status_code=401, detail="unknown or inactive user")

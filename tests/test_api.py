@@ -159,3 +159,14 @@ def test_worklist_uses_engine_ordering_urgent_before_most_overdue(tmp_path):
         rows = response.json()
         assert [row["case"] for row in rows] == ["CASE-B", "CASE-A"]
         assert all(row["overdue"] for row in rows)
+
+
+def test_health_endpoints_expose_safe_mode_and_readiness_without_case_data(tmp_path):
+    with make_client(tmp_path) as client:
+        live = client.get("/health/live")
+        ready = client.get("/health/ready")
+        assert live.status_code == 200
+        assert live.json() == {"status": "ok", "mode": "demo"}
+        assert ready.status_code == 200
+        assert ready.json()["status"] == "ready"
+        assert "cases" not in ready.text
