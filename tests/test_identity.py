@@ -5,7 +5,7 @@ import pytest
 from careflow.api import create_app
 from careflow.config import CareFlowSettings
 from careflow.engine import Pathway
-from careflow.oidc import FakeOIDCProvider, OIDCValidationError
+from careflow.oidc import FakeOIDCProvider
 from careflow.persistence import User
 from fastapi.testclient import TestClient
 
@@ -81,7 +81,7 @@ def test_fake_oidc_pkce_mapping_and_server_session_logout(tmp_path):
 def test_oidc_state_nonce_and_code_replay_are_rejected(tmp_path):
     provider = FakeOIDCProvider()
     with pilot_client(tmp_path, provider, lambda: T0) as client:
-        start = client.get("/auth/login/start", follow_redirects=False)
+        _ = client.get("/auth/login/start", follow_redirects=False)
         request = provider.authorization_requests[-1]
         code = provider.issue_authorization_code(
             subject="subject-1",
@@ -98,7 +98,7 @@ def test_oidc_state_nonce_and_code_replay_are_rejected(tmp_path):
         )
         assert replay.status_code == 401
 
-        start = client.get("/auth/login/start", follow_redirects=False)
+        _ = client.get("/auth/login/start", follow_redirects=False)
         request = provider.authorization_requests[-1]
         code = provider.issue_authorization_code(
             subject="subject-1",
@@ -123,7 +123,7 @@ def test_oidc_state_nonce_and_code_replay_are_rejected(tmp_path):
 def test_fake_oidc_rejects_invalid_verified_claims(tmp_path, overrides, message):
     provider = FakeOIDCProvider()
     with pilot_client(tmp_path, provider, lambda: T0) as client:
-        start = client.get("/auth/login/start", follow_redirects=False)
+        _ = client.get("/auth/login/start", follow_redirects=False)
         request = provider.authorization_requests[-1]
         code = provider.issue_authorization_code(
             subject="subject-1",

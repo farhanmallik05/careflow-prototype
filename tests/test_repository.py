@@ -1,9 +1,8 @@
 from datetime import datetime
 from pathlib import Path
-import pytest
 
 from careflow.engine import Case, Pathway
-from careflow.persistence import SQLiteStore, User
+from careflow.persistence import User
 from careflow.repository import (
     BaseRepository,
     PostgresRepository,

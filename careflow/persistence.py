@@ -438,17 +438,19 @@ def _apply_authz_integrity(connection: sqlite3.Connection) -> None:
     """)
 
 
+def _apply_migration_2(connection: sqlite3.Connection) -> None:
+    _apply_runtime_metadata(connection)
+    _apply_sql(connection, MIGRATION_IDENTITY_SESSION_SCHEMA)
+    _apply_authz_integrity(connection)
+
+
 MIGRATIONS = (
     _Migration(1, "baseline-careflow-schema", SCHEMA + MIGRATION_METADATA_SCHEMA, _apply_baseline),
     _Migration(
         2,
         "runtime-lifecycle-metadata",
         MIGRATION_RUNTIME_METADATA + MIGRATION_IDENTITY_SESSION_SCHEMA + MIGRATION_AUTHZ_INTEGRITY_SCHEMA,
-        lambda connection: (
-            _apply_runtime_metadata(connection),
-            _apply_sql(connection, MIGRATION_IDENTITY_SESSION_SCHEMA),
-            _apply_authz_integrity(connection),
-        ),
+        _apply_migration_2,
     ),
 )
 MIGRATIONS_BY_VERSION = {migration.version: migration for migration in MIGRATIONS}
@@ -866,8 +868,8 @@ class SQLiteStore:
             if recorded != list(range(1, version + 1)):
                 raise DatabaseLifecycleError("database migration history is incomplete")
             for row in rows:
-                migration = MIGRATIONS_BY_VERSION.get(int(row[0]))
-                if migration is None or row[1] != migration.name:
+                target_migration = MIGRATIONS_BY_VERSION.get(int(row[0]))
+                if target_migration is None or row[1] != target_migration.name:
                     if self._is_legacy_phase3_schema() and int(row[0]) == 3:
                         continue
                     raise DatabaseLifecycleError("database migration history does not match this release")
@@ -876,11 +878,11 @@ class SQLiteStore:
                 # Phase 2 databases already at revision 2 used the runtime
                 # metadata checksum before identity/session tables were added.
                 # Upgrade that known shape in place without rewriting records.
-                if int(row[0]) == 2 and row[2] != migration.checksum and (
+                if int(row[0]) == 2 and row[2] != target_migration.checksum and (
                     not IDENTITY_SESSION_TABLES.issubset(tables) or not self._has_authz_columns()
                 ):
                     continue
-                if row[2] != migration.checksum:
+                if row[2] != target_migration.checksum:
                     raise DatabaseLifecycleError("database migration history does not match this release")
 
             if version == 2 and (

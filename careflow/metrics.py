@@ -309,7 +309,7 @@ def compute_metrics(
     referral_acceptance_hours: list[float] = []
     documented_closures = 0
     overdue_count = 0
-    reasons = Counter()
+    reasons: Counter[str] = Counter()
     reason_case_count = 0
 
     for timeline in timelines:

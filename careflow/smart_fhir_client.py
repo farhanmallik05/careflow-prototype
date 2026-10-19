@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import hashlib
-import json
 import secrets
-import time
 from typing import Any, Mapping
-from urllib.parse import urlencode, urljoin
+from urllib.parse import urlencode
 
 
 @dataclass(frozen=True)

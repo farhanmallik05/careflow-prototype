@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import functools
-import os
 from typing import Any, Callable, Generator, Mapping, TypeVar
 
 from opentelemetry import trace

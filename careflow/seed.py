@@ -135,7 +135,8 @@ def seed_demo(
 ) -> dict[str, int]:
     """Create exactly 40 deterministic demo cases and supporting records."""
 
-    selected_mode = (mode or os.getenv("CAREFLOW_MODE", "demo")).strip().lower()
+    raw_mode = mode if mode is not None else os.getenv("CAREFLOW_MODE", "demo")
+    selected_mode = (raw_mode or "demo").strip().lower()
     if selected_mode != "demo":
         raise RuntimeError("demo seed/reset is unavailable outside CAREFLOW_MODE=demo")
 

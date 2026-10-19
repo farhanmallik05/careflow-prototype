@@ -452,7 +452,7 @@ def _patient_status(state: str, closed: bool) -> str:
 
 def _case_view_context(store: SQLiteStore, payload: dict[str, Any], case: Case) -> dict[str, Any]:
     record = store.get_case_record(case.id) or {}
-    patient = store.get_user(record.get("patient_user_id")) if record.get("patient_user_id") else None
+    patient = store.get_user(str(record["patient_user_id"])) if record.get("patient_user_id") else None
     timeline = []
     for event in case.audit:
         approval = event.get("approval")
@@ -1327,7 +1327,7 @@ def create_app(
     def assign_case(case_id: str, request: AssignInput, http_request: Request) -> dict[str, Any]:
         user = authenticated_user(http_request)
         case = _load_case(store, resolved_pathway, case_id)
-        record = authorize_case_access(user, case_id, mutation=True)
+        authorize_case_access(user, case_id, mutation=True)
         timestamp = now()
         if case.closed:
             raise HTTPException(status_code=409, detail="case is closed")
@@ -1370,7 +1370,7 @@ def create_app(
         record = authorize_case_access(user, case_id)
         authorize_case_access(user, case_id, mutation=True)
         request = request or MessageDraftInput()
-        patient = store.get_user(record.get("patient_user_id")) if record.get("patient_user_id") else None
+        patient = store.get_user(str(record["patient_user_id"])) if record.get("patient_user_id") else None
         context = {
             "case_id": case.id,
             "state": case.state,
@@ -1653,8 +1653,8 @@ def create_app(
         log_case_access(user, case_id, "read", f"/cases/{case_id}/consent-history")
         return _jsonable([item.__dict__ for item in store.list_consent_history(case_id=case_id)])
 
-    @app.get("/cases/{case_id}", status_code=200)
-    def get_case(case_id: str, http_request: Request) -> dict[str, Any]:
+    @app.get("/cases/{case_id}", status_code=200, response_model=None)
+    def get_case(case_id: str, http_request: Request) -> dict[str, Any] | Response:
         user = authenticated_user(http_request)
         case = _load_case(store, resolved_pathway, case_id)
         record = authorize_case_access(user, case_id)
@@ -1686,8 +1686,8 @@ def create_app(
             )
         return payload
 
-    @app.get("/patient/{patient_id}", status_code=200)
-    def get_patient(patient_id: str, http_request: Request) -> dict[str, Any]:
+    @app.get("/patient/{patient_id}", status_code=200, response_model=None)
+    def get_patient(patient_id: str, http_request: Request) -> dict[str, Any] | Response:
         user = authenticated_user(http_request)
         authorize_surface(user, "patient-collection")
         patient = store.get_user(patient_id)
@@ -1724,7 +1724,7 @@ def create_app(
             )
         return result
 
-    @app.get("/worklist", status_code=200)
+    @app.get("/worklist", status_code=200, response_model=None)
     def get_worklist(
         http_request: Request,
         page: int = 1,
@@ -1732,7 +1732,7 @@ def create_app(
         owner: str | None = None,
         urgent: bool | None = None,
         state: str | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[dict[str, Any]] | Response:
         user = authenticated_user(http_request)
         if user.role == "patient":
             raise HTTPException(status_code=403, detail="patients cannot access operational views")
@@ -1762,8 +1762,8 @@ def create_app(
             )
         return rows
 
-    @app.get("/metrics", status_code=200)
-    def get_metrics(http_request: Request) -> dict[str, Any]:
+    @app.get("/metrics", status_code=200, response_model=None)
+    def get_metrics(http_request: Request) -> dict[str, Any] | Response:
         user = authenticated_user(http_request)
         if user.role == "patient":
             raise HTTPException(status_code=403, detail="patients cannot access operational views")

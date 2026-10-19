@@ -1,5 +1,4 @@
-import pytest
-from careflow.nli_evaluator import ClinicalNLIEvaluator, NLIEvaluationResult
+from careflow.nli_evaluator import ClinicalNLIEvaluator
 
 
 def test_valid_clinical_outreach_entailment():

@@ -187,7 +187,7 @@ def test_outbox_worker_dispatches_messages(tmp_path):
 
     with make_client(tmp_path) as client:
         store = client.app.state.store
-        notification_id = store.enqueue_notification(
+        _ = store.enqueue_notification(
             event="system_alert",
             channel="internal",
             recipient="ops@careflow.test",

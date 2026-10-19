@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import re
-from typing import Any, Mapping
+from typing import Any
 
 
 def count_syllables(word: str) -> int:
@@ -141,17 +141,19 @@ def run_benchmark(cases: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     results: list[BenchmarkResult] = []
 
     for item in eval_cases:
-        readability = compute_readability(item["message"])
-        preservation = compute_clinical_preservation(item["message"], item["required_terms"])
+        msg = str(item["message"])
+        req_terms: list[str] = list(item["required_terms"])
+        readability = compute_readability(msg)
+        preservation = compute_clinical_preservation(msg, req_terms)
 
         fkgl_ok = readability["fkgl"] <= 6.0
         preservation_ok = preservation["passed"]
 
         results.append(
             BenchmarkResult(
-                case_id=item["case_id"],
-                language=item.get("language", "en"),
-                template=item.get("template", "default"),
+                case_id=str(item["case_id"]),
+                language=str(item.get("language", "en")),
+                template=str(item.get("template", "default")),
                 fkgl=readability["fkgl"],
                 reading_ease=readability["reading_ease"],
                 fkgl_passed=fkgl_ok,

@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 import os
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 import urllib.parse
 
 from careflow.engine import Case, Pathway

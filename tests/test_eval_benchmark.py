@@ -1,6 +1,5 @@
 """Unit and benchmark tests for patient message readability and clinical terminology preservation."""
 
-import pytest
 
 from careflow.eval_benchmark import (
     compute_clinical_preservation,

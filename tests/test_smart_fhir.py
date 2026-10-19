@@ -1,4 +1,3 @@
-import pytest
 from urllib.parse import parse_qs, urlparse
 from careflow.smart_fhir_client import SmartFHIRClient, SmartLaunchContext
 

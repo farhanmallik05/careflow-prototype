@@ -1,4 +1,3 @@
-import pytest
 from careflow.oidc import OIDCClaims, map_enterprise_claims_to_role
 
 

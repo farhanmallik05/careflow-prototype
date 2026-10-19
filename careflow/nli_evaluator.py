@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import re
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
 
 # Verified clinical cancer screening protocols
