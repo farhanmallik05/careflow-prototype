@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: careflow
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: Dockerfile
+    dockerContext: .
+    healthCheckPath: /
+    envVars:
+      - key: PORT
+        value: "8000"
+      - key: CAREFLOW_SESSION_SECRET
+        generateValue: true
+      - key: CAREFLOW_SESSION_MAX_AGE
+        value: "3600"
+      - key: CAREFLOW_MESSAGE_PROVIDER
+        value: rule_based
