@@ -185,9 +185,11 @@ Routes return JSON to the default `*/*` or `application/json` clients. Send `Acc
 | --- | --- | --- |
 | `/` or `/login` | Synthetic-user landing page | Public |
 | `/worklist` | Overdue, attention, and unassigned operational cases, urgent first | Authenticated staff |
-| `/cases/{case_id}` | Case summary, next actions, evidence, timeline, and audit | Authenticated staff; the linked patient may read their own case |
-| `/patient/{patient_id}` | Plain-language status for linked cases | Authenticated staff; a patient may read only their own status |
-| `/metrics` | Current counts, audit-derived measures, and labelled simulation | Authenticated staff |
+| `/cases/{case_id}` | Staff case record, or patient-safe status projection | Authenticated staff in team scope; linked patient may read only the safe projection |
+| `/patient/{patient_id}` | Plain-language status for linked cases | Authenticated staff in team scope; a patient may read only their own status |
+| `/metrics` | Scoped counts, audit-derived measures, and labelled simulation | Authenticated staff in team scope |
+| `/cases/{case_id}/audit` | Ordered workflow audit history | Authenticated staff in team scope; patients denied |
+| `/cases/{case_id}/access-logs` | Scoped access history | Authenticated staff in team scope; patients denied |
 
 Example JSON read:
 
@@ -243,7 +245,7 @@ curl -sS -b careflow.cookies -H 'Content-Type: application/json' \
   http://127.0.0.1:8000/cases/CASE-API-001/transition
 ```
 
-The route reloads the case, authorizes the authenticated role, delegates the state change to `Case.transition`, and saves the snapshot plus ordered audit/evidence/approval records. The authenticated user's role must match the current state's owner role, or an authorized approver (`clinician_on_call` or `care_coordinator`) must submit a matching non-blank approval note. The check is role-based; the separately tracked owner ID is not an additional transition gate. Missing required evidence returns a transition error (HTTP 422); other illegal/conflicting transitions return HTTP 409. `POST /cases/{case_id}/assign` accepts `person`, `owner`, or `assignee`, but the target must be active and have the role required by the current state.
+The route reloads the case, authorizes the authenticated principal and active local role, delegates the state change to `Case.transition`, and saves the snapshot plus ordered audit/evidence/approval records with compare-and-swap version protection. The authenticated user must be the assigned owner, or an authorized approver (`clinician_on_call` or `care_coordinator`) must submit a server-bound matching non-blank approval note. Caller-supplied actor, approval name, and approval role labels never authorize a request. Missing required evidence returns a transition error (HTTP 422); illegal, stale, or replayed mutations return HTTP 409 with a retry instruction. `POST /cases/{case_id}/assign` accepts `person`, `owner`, or `assignee`, but the target must be active and have the role required by the current state; same-role non-owners cannot assign.
 
 ### Patient-message drafts and consent-gated outbox
 
@@ -266,7 +268,7 @@ curl -sS -b careflow.cookies -H 'Content-Type: application/json' \
   http://127.0.0.1:8000/message-drafts/{draft_id}/approve
 ```
 
-Approval atomically marks the draft approved and inserts one `patient_message` row in `notification_outbox` with status `queued`. The prototype has no delivery worker or external transport, so no message is sent. The system deliberately documents that **no message is sent** by this local outbox. Selecting `CAREFLOW_MESSAGE_PROVIDER=llm` only selects an unconfigured boundary and returns a clear 503; it does not make a network request.
+Approval atomically marks the draft approved and inserts one `patient_message` row in `notification_outbox` with status `queued`. Repeating the same approval or queue request returns the existing record rather than duplicating it. Consent withdrawal makes approved drafts and queued rows `unavailable`; the prototype has no delivery worker or external transport, so no message is sent. The system deliberately documents that **no message is sent** by this local outbox. Selecting `CAREFLOW_MESSAGE_PROVIDER=llm` only selects an unconfigured boundary and returns a clear 503; it does not make a network request.
 
 ### Metrics
 
@@ -281,8 +283,8 @@ These are the behavior-level guarantees covered by the current engine/API/persis
 - Required evidence is enforced for acknowledgement, clinical review, acceptance, appointment booking, attendance, and closure. A documented approval from an authorized approver may waive a requirement; the approval role must match the authenticated role.
 - Every successful case opening, assignment, and transition is retained in the ordered audit; rejected transitions do not mutate the case. Successful case reads, mutations, worklist accesses, and metrics accesses are recorded in `access_logs`.
 - Every open case has an owner. A closed case has no owner. Assignment requires an active user whose role owns the current state.
-- Patients can read only their own linked case/status. Patients cannot use operational worklists, metrics, message drafting, or message approval. Staff-only operational reads are enforced by the API.
+- Every JSON/HTML/alias/collection/worklist/metrics/draft/audit/access-log surface has an explicit deny-by-default policy. Patients can read only their own linked case/status projection and cannot use operational worklists, metrics, drafts, audits, or access logs. Staff reads are team/assignment scoped and same-role non-owner mutations are denied.
 - `unreachable` and `no_show` route to `escalated`; the escalated state is owned by `clinician_on_call` and requires `human_decision` to resolve. The worklist includes overdue/attention cases and orders urgent cases first.
-- Case notifications and message approval are consent-gated by a granted, unexpired case/user consent. Approved drafts remain queued in the local outbox; there is no real notification path.
+- Case notifications and message approval are consent-gated by a granted, unexpired case/user consent checked immediately before queueing. Consent history records grants, withdrawals, and observed expiry; approved drafts remain local queued/unavailable records and there is no real notification path.
 
 More detail is in [docs/architecture.md](docs/architecture.md), [docs/safety.md](docs/safety.md), and the three-minute [docs/demo-script.md](docs/demo-script.md).

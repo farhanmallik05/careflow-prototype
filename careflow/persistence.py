@@ -23,6 +23,7 @@ from careflow.engine import Case, Pathway
 
 
 CURRENT_SCHEMA_VERSION = 2
+LEGACY_PHASE3_SCHEMA_VERSION = 3
 SCHEMA_VERSION = CURRENT_SCHEMA_VERSION
 SQLITE_BUSY_TIMEOUT_MS = 5_000
 SQLITE_BUSY_TIMEOUT_SECONDS = SQLITE_BUSY_TIMEOUT_MS / 1_000
@@ -38,6 +39,10 @@ class UnsupportedSchemaError(DatabaseLifecycleError):
 
 class DatabaseIntegrityError(DatabaseLifecycleError):
     """Raised when SQLite or application-level integrity checks fail."""
+
+
+class ConcurrencyConflict(RuntimeError):
+    """Raised when a compare-and-swap write lost to a newer case version."""
 
 
 SCHEMA = """
@@ -137,7 +142,7 @@ CREATE TABLE IF NOT EXISTS message_drafts (
     provider TEXT NOT NULL,
     review_required INTEGER NOT NULL CHECK (review_required IN (0, 1)),
     review_flag TEXT,
-    status TEXT NOT NULL CHECK (status IN ('pending_approval', 'approved', 'rejected')),
+    status TEXT NOT NULL CHECK (status IN ('generated', 'pending_approval', 'approved', 'queued', 'failed', 'unavailable', 'rejected')),
     created_by TEXT NOT NULL REFERENCES users(id),
     created_at TEXT NOT NULL,
     approved_by TEXT REFERENCES users(id),
@@ -228,6 +233,41 @@ CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(idle_expires_at, absolute_expires_at);
 """
 
+MIGRATION_AUTHZ_INTEGRITY_SCHEMA = """
+ALTER TABLE cases ADD COLUMN version INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE evidence ADD COLUMN recorded_role TEXT;
+ALTER TABLE evidence ADD COLUMN state TEXT;
+ALTER TABLE evidence ADD COLUMN action TEXT;
+ALTER TABLE evidence ADD COLUMN provenance_json TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE approvals ADD COLUMN principal_id TEXT;
+ALTER TABLE approvals ADD COLUMN state TEXT;
+ALTER TABLE approvals ADD COLUMN provenance_json TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE notification_outbox ADD COLUMN provenance_json TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE message_drafts ADD COLUMN created_role TEXT;
+ALTER TABLE message_drafts ADD COLUMN created_state TEXT;
+ALTER TABLE message_drafts ADD COLUMN created_provenance_json TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE message_drafts ADD COLUMN approved_role TEXT;
+ALTER TABLE message_drafts ADD COLUMN approved_principal_id TEXT;
+ALTER TABLE message_drafts ADD COLUMN approved_state TEXT;
+ALTER TABLE message_drafts ADD COLUMN approved_provenance_json TEXT NOT NULL DEFAULT '{}';
+
+CREATE TABLE IF NOT EXISTS consent_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    consent_id TEXT NOT NULL,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    case_id TEXT REFERENCES cases(id),
+    consent_type TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'granted', 'withdrawn')),
+    occurred_at TEXT NOT NULL,
+    expires_at TEXT,
+    source TEXT NOT NULL,
+    principal_id TEXT,
+    provenance_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_consent_history_case ON consent_history(case_id, occurred_at, id);
+CREATE INDEX IF NOT EXISTS idx_consent_history_user ON consent_history(user_id, occurred_at, id);
+"""
+
 
 @dataclass(frozen=True)
 class _Migration:
@@ -259,15 +299,155 @@ def _apply_sql(connection: sqlite3.Connection, sql: str) -> None:
             connection.execute(statement)
 
 
+def _apply_authz_integrity(connection: sqlite3.Connection) -> None:
+    """Add Phase 4 bindings while preserving every existing operational row."""
+
+    column_additions = {
+        "cases": (("version", "INTEGER NOT NULL DEFAULT 0"),),
+        "evidence": (
+            ("recorded_role", "TEXT"),
+            ("state", "TEXT"),
+            ("action", "TEXT"),
+            ("provenance_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ),
+        "approvals": (
+            ("principal_id", "TEXT"),
+            ("state", "TEXT"),
+            ("provenance_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ),
+        "notification_outbox": (("provenance_json", "TEXT NOT NULL DEFAULT '{}'"),),
+        "message_drafts": (
+            ("created_role", "TEXT"),
+            ("created_state", "TEXT"),
+            ("created_provenance_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ("approved_role", "TEXT"),
+            ("approved_principal_id", "TEXT"),
+            ("approved_state", "TEXT"),
+            ("approved_provenance_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ),
+    }
+    for table, additions in column_additions.items():
+        existing_columns = {
+            str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        for column, definition in additions:
+            if column not in existing_columns:
+                connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    connection.execute("DROP INDEX IF EXISTS idx_outbox_ready")
+    connection.execute("ALTER TABLE notification_outbox RENAME TO notification_outbox_legacy")
+    connection.execute(
+        """
+        CREATE TABLE notification_outbox (
+            id TEXT PRIMARY KEY,
+            case_id TEXT REFERENCES cases(id) ON DELETE CASCADE,
+            event TEXT NOT NULL,
+            channel TEXT NOT NULL,
+            recipient TEXT,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL CHECK (status IN ('queued', 'processing', 'sent', 'failed', 'unavailable')),
+            available_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            sent_at TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            dedupe_key TEXT UNIQUE,
+            provenance_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO notification_outbox
+            (id, case_id, event, channel, recipient, payload_json, status,
+             available_at, created_at, sent_at, attempts, dedupe_key, provenance_json)
+        SELECT id, case_id, event, channel, recipient, payload_json, status,
+               available_at, created_at, sent_at, attempts, dedupe_key, provenance_json
+        FROM notification_outbox_legacy
+        """
+    )
+    connection.execute("DROP TABLE notification_outbox_legacy")
+    connection.execute("CREATE INDEX idx_outbox_ready ON notification_outbox(status, available_at)")
+
+    connection.execute("DROP INDEX IF EXISTS idx_message_drafts_case")
+    connection.execute("DROP INDEX IF EXISTS idx_message_drafts_status")
+    connection.execute("ALTER TABLE message_drafts RENAME TO message_drafts_legacy")
+    connection.execute(
+        """
+        CREATE TABLE message_drafts (
+            id TEXT PRIMARY KEY,
+            case_id TEXT NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+            patient_user_id TEXT REFERENCES users(id),
+            language TEXT NOT NULL,
+            template TEXT NOT NULL,
+            message TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            review_required INTEGER NOT NULL CHECK (review_required IN (0, 1)),
+            review_flag TEXT,
+            status TEXT NOT NULL CHECK (status IN ('generated', 'pending_approval', 'approved', 'queued', 'failed', 'unavailable', 'rejected')),
+            created_by TEXT NOT NULL REFERENCES users(id),
+            created_at TEXT NOT NULL,
+            approved_by TEXT REFERENCES users(id),
+            approved_at TEXT,
+            approval_note TEXT,
+            notification_id TEXT,
+            created_role TEXT,
+            created_state TEXT,
+            created_provenance_json TEXT NOT NULL DEFAULT '{}',
+            approved_role TEXT,
+            approved_principal_id TEXT,
+            approved_state TEXT,
+            approved_provenance_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO message_drafts
+            (id, case_id, patient_user_id, language, template, message, provider,
+             review_required, review_flag, status, created_by, created_at, approved_by,
+             approved_at, approval_note, notification_id, created_role, created_state,
+             created_provenance_json, approved_role, approved_principal_id, approved_state,
+             approved_provenance_json)
+        SELECT id, case_id, patient_user_id, language, template, message, provider,
+               review_required, review_flag, status, created_by, created_at, approved_by,
+               approved_at, approval_note, notification_id, created_role, created_state,
+               created_provenance_json, approved_role, approved_principal_id, approved_state,
+               approved_provenance_json
+        FROM message_drafts_legacy
+        """
+    )
+    connection.execute("DROP TABLE message_drafts_legacy")
+    connection.execute("CREATE INDEX idx_message_drafts_case ON message_drafts(case_id, created_at, id)")
+    connection.execute("CREATE INDEX idx_message_drafts_status ON message_drafts(status, created_at, id)")
+    _apply_sql(connection, """
+        CREATE TABLE IF NOT EXISTS consent_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            consent_id TEXT NOT NULL,
+            user_id TEXT NOT NULL REFERENCES users(id),
+            case_id TEXT REFERENCES cases(id),
+            consent_type TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('pending', 'granted', 'withdrawn')),
+            occurred_at TEXT NOT NULL,
+            expires_at TEXT,
+            source TEXT NOT NULL,
+            principal_id TEXT,
+            provenance_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_consent_history_case ON consent_history(case_id, occurred_at, id);
+        CREATE INDEX IF NOT EXISTS idx_consent_history_user ON consent_history(user_id, occurred_at, id);
+    """)
+
+
 MIGRATIONS = (
     _Migration(1, "baseline-careflow-schema", SCHEMA + MIGRATION_METADATA_SCHEMA, _apply_baseline),
     _Migration(
         2,
         "runtime-lifecycle-metadata",
-        MIGRATION_RUNTIME_METADATA + MIGRATION_IDENTITY_SESSION_SCHEMA,
+        MIGRATION_RUNTIME_METADATA + MIGRATION_IDENTITY_SESSION_SCHEMA + MIGRATION_AUTHZ_INTEGRITY_SCHEMA,
         lambda connection: (
             _apply_runtime_metadata(connection),
             _apply_sql(connection, MIGRATION_IDENTITY_SESSION_SCHEMA),
+            _apply_authz_integrity(connection),
         ),
     ),
 )
@@ -289,6 +469,8 @@ LEGACY_TABLES = frozenset(
 IDENTITY_SESSION_TABLES = frozenset(
     {"oidc_identity_links", "oidc_login_states", "sessions"}
 )
+
+AUTHZ_INTEGRITY_TABLES = frozenset({"consent_history"})
 
 USER_ROLES = frozenset(
     {
@@ -372,6 +554,8 @@ class Consent:
     case_id: str | None = None
     expires_at: datetime | None = None
     source: str = "recorded"
+    principal_id: str | None = None
+    provenance: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -382,6 +566,10 @@ class EvidenceRecord:
     recorded_at: datetime
     recorded_by: str | None = None
     details: Mapping[str, Any] = field(default_factory=dict)
+    recorded_role: str | None = None
+    state: str | None = None
+    action: str | None = None
+    provenance: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -393,6 +581,9 @@ class ApprovalRecord:
     note: str
     approver_name: str | None = None
     recorded_at: datetime | None = None
+    principal_id: str | None = None
+    state: str | None = None
+    provenance: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -415,6 +606,13 @@ class MessageDraftRecord:
     approved_at: datetime | None = None
     approval_note: str | None = None
     notification_id: str | None = None
+    created_role: str | None = None
+    created_state: str | None = None
+    created_provenance: Mapping[str, Any] = field(default_factory=dict)
+    approved_role: str | None = None
+    approved_principal_id: str | None = None
+    approved_state: str | None = None
+    approved_provenance: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -496,6 +694,7 @@ class SQLiteStore:
         "oidc_identity_links",
         "oidc_login_states",
         "sessions",
+        "consent_history",
     }
 
     def __init__(self, path: str | Path = "careflow.db", *, auto_migrate: bool = True) -> None:
@@ -548,7 +747,7 @@ class SQLiteStore:
         return {
             "version": self.schema_version,
             "supported_version": CURRENT_SCHEMA_VERSION,
-            "current": self.schema_version == CURRENT_SCHEMA_VERSION,
+            "current": self.schema_version == CURRENT_SCHEMA_VERSION or self._is_legacy_phase3_schema(),
         }
 
     def _table_names(self) -> set[str]:
@@ -557,9 +756,31 @@ class SQLiteStore:
         ).fetchall()
         return {str(row[0]) for row in rows}
 
+    def _has_authz_columns(self) -> bool:
+        case_rows = self.connection.execute("PRAGMA table_info(cases)").fetchall()
+        evidence_rows = self.connection.execute("PRAGMA table_info(evidence)").fetchall()
+        return "version" in {str(row[1]) for row in case_rows} and "action" in {
+            str(row[1]) for row in evidence_rows
+        }
+
+    def _is_legacy_phase3_schema(self) -> bool:
+        """Recognize the prior Phase 3 identity/session revision in-place."""
+
+        if self.schema_version != LEGACY_PHASE3_SCHEMA_VERSION:
+            return False
+        rows = self.connection.execute(
+            "SELECT version, name FROM schema_migrations ORDER BY version"
+        ).fetchall()
+        return (
+            [int(row[0]) for row in rows] == [1, 2, 3]
+            and str(rows[-1][1]) == "oidc-identity-and-server-sessions"
+            and IDENTITY_SESSION_TABLES.issubset(self._table_names())
+        )
+
     def _validate_schema_contract(self) -> None:
         version = self.schema_version
-        if version > CURRENT_SCHEMA_VERSION:
+        legacy_phase3 = self._is_legacy_phase3_schema()
+        if version > CURRENT_SCHEMA_VERSION and not legacy_phase3:
             raise UnsupportedSchemaError(
                 f"database schema version {version} is newer than supported version {CURRENT_SCHEMA_VERSION}"
             )
@@ -570,6 +791,7 @@ class SQLiteStore:
         missing = (
             LEGACY_TABLES
             | IDENTITY_SESSION_TABLES
+            | AUTHZ_INTEGRITY_TABLES
             | {"schema_migrations", "database_metadata"}
         ) - self._table_names()
         if missing:
@@ -577,9 +799,12 @@ class SQLiteStore:
         rows = self.connection.execute(
             "SELECT version, name, checksum FROM schema_migrations ORDER BY version"
         ).fetchall()
-        if [int(row[0]) for row in rows] != sorted(MIGRATIONS_BY_VERSION):
+        expected_versions = [1, 2, 3] if legacy_phase3 else sorted(MIGRATIONS_BY_VERSION)
+        if [int(row[0]) for row in rows] != expected_versions:
             raise DatabaseLifecycleError("database migration history is incomplete")
         for row in rows:
+            if legacy_phase3:
+                continue
             migration = MIGRATIONS_BY_VERSION[int(row[0])]
             if row[1] != migration.name or row[2] != migration.checksum:
                 raise DatabaseLifecycleError("database migration history does not match this release")
@@ -600,6 +825,12 @@ class SQLiteStore:
     def _run_migrations(self) -> None:
         version = self.schema_version
         tables = self._table_names()
+        if version == LEGACY_PHASE3_SCHEMA_VERSION and self._is_legacy_phase3_schema():
+            if not self._has_authz_columns():
+                with self.connection:
+                    self.connection.execute("BEGIN IMMEDIATE")
+                    _apply_authz_integrity(self.connection)
+            return
         if version > CURRENT_SCHEMA_VERSION:
             raise UnsupportedSchemaError(
                 f"database schema version {version} is newer than supported version {CURRENT_SCHEMA_VERSION}"
@@ -629,24 +860,31 @@ class SQLiteStore:
             for row in rows:
                 migration = MIGRATIONS_BY_VERSION.get(int(row[0]))
                 if migration is None or row[1] != migration.name:
+                    if self._is_legacy_phase3_schema() and int(row[0]) == 3:
+                        continue
                     raise DatabaseLifecycleError("database migration history does not match this release")
+                if self._is_legacy_phase3_schema() and int(row[0]) == 2:
+                    continue
                 # Phase 2 databases already at revision 2 used the runtime
                 # metadata checksum before identity/session tables were added.
                 # Upgrade that known shape in place without rewriting records.
-                if (
-                    int(row[0]) == 2
-                    and row[2] != migration.checksum
-                    and not IDENTITY_SESSION_TABLES.issubset(tables)
+                if int(row[0]) == 2 and row[2] != migration.checksum and (
+                    not IDENTITY_SESSION_TABLES.issubset(tables) or not self._has_authz_columns()
                 ):
                     continue
                 if row[2] != migration.checksum:
                     raise DatabaseLifecycleError("database migration history does not match this release")
 
-            if version == 2 and not IDENTITY_SESSION_TABLES.issubset(tables):
+            if version == 2 and (
+                not IDENTITY_SESSION_TABLES.issubset(tables) or not self._has_authz_columns()
+            ):
                 migration = MIGRATIONS_BY_VERSION[2]
                 with self.connection:
                     self.connection.execute("BEGIN IMMEDIATE")
-                    _apply_sql(self.connection, MIGRATION_IDENTITY_SESSION_SCHEMA)
+                    if not IDENTITY_SESSION_TABLES.issubset(tables):
+                        _apply_sql(self.connection, MIGRATION_IDENTITY_SESSION_SCHEMA)
+                    if not self._has_authz_columns():
+                        _apply_authz_integrity(self.connection)
                     self.connection.execute(
                         "UPDATE schema_migrations SET checksum = ? WHERE version = 2",
                         (migration.checksum,),
@@ -740,6 +978,7 @@ class SQLiteStore:
                 "approvals",
                 "evidence",
                 "consents",
+                "consent_history",
                 "cases",
                 "users",
             ):
@@ -1082,9 +1321,22 @@ class SQLiteStore:
         return int(updated.rowcount)
 
     def add_consent(self, consent: Consent) -> None:
+        """Record the current consent and append an immutable history event."""
+
         if consent.status not in {"pending", "granted", "withdrawn"}:
             raise ValueError("consent status must be pending, granted, or withdrawn")
-        with self.connection:
+        if self.get_user(consent.user_id) is None:
+            raise KeyError(f"user not found: {consent.user_id}")
+        occurred_at = consent.granted_at
+        with self._lock, self.connection:
+            existing = self.connection.execute(
+                """
+                SELECT id FROM consents
+                WHERE user_id = ? AND case_id IS ? AND consent_type = ?
+                """,
+                (consent.user_id, consent.case_id, consent.consent_type),
+            ).fetchone()
+            consent_id = str(existing["id"]) if existing is not None else consent.id
             self.connection.execute(
                 """
                 INSERT INTO consents
@@ -1100,7 +1352,7 @@ class SQLiteStore:
                     source = excluded.source
                 """,
                 (
-                    consent.id,
+                    consent_id,
                     consent.user_id,
                     consent.case_id,
                     consent.consent_type,
@@ -1110,6 +1362,44 @@ class SQLiteStore:
                     consent.source,
                 ),
             )
+            self.connection.execute(
+                """
+                INSERT INTO consent_history
+                    (consent_id, user_id, case_id, consent_type, status, occurred_at,
+                     expires_at, source, principal_id, provenance_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    consent_id,
+                    consent.user_id,
+                    consent.case_id,
+                    consent.consent_type,
+                    consent.status,
+                    _iso(occurred_at),
+                    _optional_iso(consent.expires_at),
+                    consent.source,
+                    consent.principal_id,
+                    _json(consent.provenance),
+                ),
+            )
+            if consent.status == "withdrawn" and consent.case_id:
+                self.connection.execute(
+                    """
+                    UPDATE notification_outbox
+                    SET status = 'unavailable',
+                        provenance_json = ?
+                    WHERE case_id = ? AND status IN ('queued', 'processing')
+                    """,
+                    (_json({"reason": "consent_withdrawn", "withdrawn_at": _iso(occurred_at)}), consent.case_id),
+                )
+                self.connection.execute(
+                    """
+                    UPDATE message_drafts
+                    SET status = 'unavailable'
+                    WHERE case_id = ? AND status IN ('approved', 'queued')
+                    """,
+                    (consent.case_id,),
+                )
 
     def list_consents(self, *, user_id: str | None = None, case_id: str | None = None) -> list[Consent]:
         query, args = "SELECT * FROM consents", []
@@ -1134,6 +1424,41 @@ class SQLiteStore:
                 granted_at=_datetime(row["granted_at"]),
                 expires_at=_datetime(row["expires_at"]) if row["expires_at"] else None,
                 source=row["source"],
+                principal_id=None,
+                provenance={},
+            )
+            for row in rows
+        ]
+
+    def list_consent_history(
+        self, *, user_id: str | None = None, case_id: str | None = None
+    ) -> list[Consent]:
+        """Return append-only grant/withdraw/expiry decisions in order."""
+
+        query, args = "SELECT * FROM consent_history", []
+        clauses = []
+        if user_id is not None:
+            clauses.append("user_id = ?")
+            args.append(user_id)
+        if case_id is not None:
+            clauses.append("case_id = ?")
+            args.append(case_id)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY occurred_at, id"
+        rows = self.connection.execute(query, args).fetchall()
+        return [
+            Consent(
+                id=row["consent_id"],
+                user_id=row["user_id"],
+                case_id=row["case_id"],
+                consent_type=row["consent_type"],
+                status=row["status"],
+                granted_at=_datetime(row["occurred_at"]),
+                expires_at=_datetime(row["expires_at"]) if row["expires_at"] else None,
+                source=row["source"],
+                principal_id=row["principal_id"],
+                provenance=_from_json(row["provenance_json"], {}),
             )
             for row in rows
         ]
@@ -1147,22 +1472,46 @@ class SQLiteStore:
         recorded_at: datetime | str | None = None,
         recorded_by: str | None = None,
         details: Mapping[str, Any] | None = None,
+        recorded_role: str | None = None,
+        state: str | None = None,
+        action: str | None = None,
+        provenance: Mapping[str, Any] | None = None,
     ) -> str:
         evidence_id = evidence_id or f"{case_id}:{kind}"
         recorded_at = recorded_at or datetime.now(timezone.utc)
-        with self.connection:
+        with self._lock, self.connection:
+            existing = self.connection.execute(
+                "SELECT case_id, kind, recorded_by, recorded_role, state, action, provenance_json, details_json FROM evidence WHERE id = ?",
+                (evidence_id,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["case_id"] != case_id
+                    or existing["kind"] != kind
+                    or existing["recorded_by"] != recorded_by
+                    or existing["action"] != action
+                ):
+                    raise ValueError("evidence provenance is immutable")
+                return evidence_id
             self.connection.execute(
                 """
-                INSERT INTO evidence (id, case_id, kind, recorded_at, recorded_by, details_json)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    case_id = excluded.case_id,
-                    kind = excluded.kind,
-                    recorded_at = excluded.recorded_at,
-                    recorded_by = excluded.recorded_by,
-                    details_json = excluded.details_json
+                INSERT INTO evidence
+                    (id, case_id, kind, recorded_at, recorded_by, recorded_role, state,
+                     action, provenance_json, details_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (evidence_id, case_id, kind, _iso(recorded_at), recorded_by, _json(details or {})),
+                (
+                    evidence_id,
+                    case_id,
+                    kind,
+                    _iso(recorded_at),
+                    recorded_by,
+                    recorded_role,
+                    state,
+                    action,
+                    _json(provenance or {}),
+                    _json(details or {}),
+                ),
             )
         return evidence_id
 
@@ -1178,6 +1527,10 @@ class SQLiteStore:
                 recorded_at=_datetime(row["recorded_at"]),
                 recorded_by=row["recorded_by"],
                 details=_from_json(row["details_json"], {}),
+                recorded_role=row["recorded_role"],
+                state=row["state"],
+                action=row["action"],
+                provenance=_from_json(row["provenance_json"], {}),
             )
             for row in rows
         ]
@@ -1192,26 +1545,48 @@ class SQLiteStore:
         approval_id: str | None = None,
         approver_name: str | None = None,
         recorded_at: datetime | str | None = None,
+        principal_id: str | None = None,
+        state: str | None = None,
+        provenance: Mapping[str, Any] | None = None,
     ) -> str:
         if not note:
             raise ValueError("an approval note is required")
         recorded_at = recorded_at or datetime.now(timezone.utc)
         approval_id = approval_id or f"{case_id}:approval:{action}:{_iso(recorded_at)}"
-        with self.connection:
+        with self._lock, self.connection:
+            existing = self.connection.execute(
+                "SELECT case_id, action, role, principal_id, note FROM approvals WHERE id = ?",
+                (approval_id,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["case_id"] != case_id
+                    or existing["action"] != action
+                    or existing["role"] != role
+                    or existing["principal_id"] != principal_id
+                    or existing["note"] != note
+                ):
+                    raise ValueError("approval provenance is immutable")
+                return approval_id
             self.connection.execute(
                 """
                 INSERT INTO approvals
-                    (id, case_id, action, role, approver_name, note, recorded_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    case_id = excluded.case_id,
-                    action = excluded.action,
-                    role = excluded.role,
-                    approver_name = excluded.approver_name,
-                    note = excluded.note,
-                    recorded_at = excluded.recorded_at
+                    (id, case_id, action, role, approver_name, note, recorded_at,
+                     principal_id, state, provenance_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (approval_id, case_id, action, role, approver_name, note, _iso(recorded_at)),
+                (
+                    approval_id,
+                    case_id,
+                    action,
+                    role,
+                    approver_name,
+                    note,
+                    _iso(recorded_at),
+                    principal_id,
+                    state,
+                    _json(provenance or {}),
+                ),
             )
         return approval_id
 
@@ -1228,6 +1603,9 @@ class SQLiteStore:
                 note=row["note"],
                 approver_name=row["approver_name"],
                 recorded_at=_datetime(row["recorded_at"]),
+                principal_id=row["principal_id"],
+                state=row["state"],
+                provenance=_from_json(row["provenance_json"], {}),
             )
             for row in rows
         ]
@@ -1246,6 +1624,9 @@ class SQLiteStore:
         created_by: str,
         created_at: datetime | str,
         draft_id: str | None = None,
+        created_role: str | None = None,
+        created_state: str | None = None,
+        created_provenance: Mapping[str, Any] | None = None,
     ) -> str:
         """Persist a generated draft without touching the case snapshot."""
 
@@ -1259,8 +1640,9 @@ class SQLiteStore:
                 """
                 INSERT INTO message_drafts
                     (id, case_id, patient_user_id, language, template, message, provider,
-                     review_required, review_flag, status, created_by, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_approval', ?, ?)
+                     review_required, review_flag, status, created_by, created_at,
+                     created_role, created_state, created_provenance_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_approval', ?, ?, ?, ?, ?)
                 """,
                 (
                     draft_id,
@@ -1274,6 +1656,9 @@ class SQLiteStore:
                     review_flag,
                     created_by,
                     _iso(created_at),
+                    created_role,
+                    created_state,
+                    _json(created_provenance or {}),
                 ),
             )
         return draft_id
@@ -1297,7 +1682,7 @@ class SQLiteStore:
             args.append(case_id)
         if status is not None:
             status = status.strip().lower().replace(" ", "_")
-            if status not in {"pending_approval", "approved", "rejected"}:
+            if status not in {"generated", "pending_approval", "approved", "queued", "failed", "unavailable", "rejected"}:
                 raise ValueError("unknown message draft status")
             clauses.append("status = ?")
             args.append(status)
@@ -1318,6 +1703,9 @@ class SQLiteStore:
         payload: Mapping[str, Any] | None = None,
         consent_user_id: str | None = None,
         channel: str = "internal",
+        approved_role: str | None = None,
+        approved_state: str | None = None,
+        approved_provenance: Mapping[str, Any] | None = None,
     ) -> tuple[MessageDraftRecord, dict[str, Any]]:
         """Approve one draft and queue one outbox row atomically.
 
@@ -1326,34 +1714,50 @@ class SQLiteStore:
         delivery worker is invoked here; the resulting row remains ``queued``.
         """
 
-        draft = self.get_message_draft(draft_id)
-        if draft is None:
-            raise KeyError(f"message draft not found: {draft_id}")
-        if draft.status != "pending_approval":
-            raise ValueError(f"message draft is already {draft.status}")
         if not approval_note.strip():
             raise ValueError("an approval note is required")
         approved_at = _datetime(approved_at)
-        if not self.has_valid_consent(
-            draft.case_id,
-            user_id=consent_user_id or draft.patient_user_id,
-            now=approved_at,
-        ):
-            raise ValueError("case notification requires a granted, unexpired case/user consent")
+        with self._lock, self.connection:
+            row = self.connection.execute(
+                "SELECT * FROM message_drafts WHERE id = ?", (draft_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"message draft not found: {draft_id}")
+            draft = self._message_draft_row(row)
+            notification_id = f"notification:patient_message:{draft.case_id}:{draft.id}"
+            if draft.status in {"approved", "queued"}:
+                existing = self.connection.execute(
+                    "SELECT * FROM notification_outbox WHERE id = ?", (notification_id,)
+                ).fetchone()
+                if existing is not None:
+                    return draft, self._outbox_row(existing)
+            if draft.status == "unavailable":
+                raise ValueError("message draft is unavailable after consent withdrawal")
+            if draft.status != "pending_approval":
+                raise ValueError(f"message draft is already {draft.status}")
+            if not self.has_valid_consent(
+                draft.case_id,
+                user_id=consent_user_id or draft.patient_user_id,
+                now=approved_at,
+            ):
+                raise ValueError("case notification requires a granted, unexpired case/user consent")
 
-        notification_id = f"notification:patient_message:{draft.case_id}:{draft.id}"
-        notification_payload = dict(payload or {})
-        notification_payload.setdefault("draft_id", draft.id)
-        notification_payload.setdefault("message", draft.message)
-        notification_payload.setdefault("language", draft.language)
-        notification_payload.setdefault("review_flag", draft.review_flag)
-        with self.connection:
+            notification_payload = dict(payload or {})
+            notification_payload.setdefault("draft_id", draft.id)
+            notification_payload.setdefault("message", draft.message)
+            notification_payload.setdefault("language", draft.language)
+            notification_payload.setdefault("review_flag", draft.review_flag)
+            provenance = dict(approved_provenance or {})
+            provenance.setdefault("principal_id", approved_by)
+            provenance.setdefault("role", approved_role)
+            provenance.setdefault("state", approved_state)
             self.connection.execute(
                 """
                 INSERT INTO notification_outbox
                     (id, case_id, event, channel, recipient, payload_json, status,
-                     available_at, created_at, dedupe_key)
-                VALUES (?, ?, 'patient_message', ?, ?, ?, 'queued', ?, ?, ?)
+                     available_at, created_at, dedupe_key, provenance_json)
+                VALUES (?, ?, 'patient_message', ?, ?, ?, 'queued', ?, ?, ?, ?)
+                ON CONFLICT(id) DO NOTHING
                 """,
                 (
                     notification_id,
@@ -1364,27 +1768,60 @@ class SQLiteStore:
                     _iso(approved_at),
                     _iso(approved_at),
                     f"message-draft:{draft.id}",
+                    _json(provenance),
                 ),
             )
-            self.connection.execute(
+            updated_count = self.connection.execute(
                 """
                 UPDATE message_drafts
-                SET status = 'approved', approved_by = ?, approved_at = ?, approval_note = ?, notification_id = ?
+                SET status = 'approved', approved_by = ?, approved_at = ?, approval_note = ?,
+                    notification_id = ?, approved_role = ?, approved_principal_id = ?,
+                    approved_state = ?, approved_provenance_json = ?
                 WHERE id = ? AND status = 'pending_approval'
                 """,
-                (approved_by, _iso(approved_at), approval_note, notification_id, draft.id),
-            )
+                (
+                    approved_by,
+                    _iso(approved_at),
+                    approval_note,
+                    notification_id,
+                    approved_role,
+                    approved_by,
+                    approved_state,
+                    _json(provenance),
+                    draft.id,
+                ),
+            ).rowcount
+            if updated_count != 1:
+                current = self.connection.execute(
+                    "SELECT * FROM message_drafts WHERE id = ?", (draft.id,)
+                ).fetchone()
+                if current is None or current["status"] not in {"approved", "queued"}:
+                    raise ValueError("message draft approval conflict; retry with the current draft")
+                draft = self._message_draft_row(current)
+            else:
+                draft_row = self.connection.execute(
+                    "SELECT * FROM message_drafts WHERE id = ?", (draft.id,)
+                ).fetchone()
+                assert draft_row is not None
+                draft = self._message_draft_row(draft_row)
+            row = self.connection.execute(
+                "SELECT * FROM notification_outbox WHERE id = ?", (notification_id,)
+            ).fetchone()
+            assert row is not None
+            return draft, self._outbox_row(row)
 
-        updated = self.get_message_draft(draft.id)
-        assert updated is not None
-        row = self.connection.execute(
-            "SELECT * FROM notification_outbox WHERE id = ?", (notification_id,)
-        ).fetchone()
-        assert row is not None
-        return updated, self._outbox_row(row)
+    def save_case(
+        self,
+        case: Case,
+        *,
+        patient_user_id: str | None = None,
+        expected_version: int | None = None,
+    ) -> None:
+        """Persist a case with an optimistic compare-and-swap boundary.
 
-    def save_case(self, case: Case, *, patient_user_id: str | None = None) -> None:
-        """Persist a case and its complete audit snapshot atomically."""
+        Existing audit/evidence/approval provenance is append-only.  A stale
+        aggregate raises :class:`ConcurrencyConflict` before any row is changed.
+        """
 
         if case.state not in case.pw.states and case.state not in case.pw.terminal:
             raise ValueError(f"unknown case state: {case.state}")
@@ -1397,23 +1834,21 @@ class SQLiteStore:
 
         created_at = _datetime(case.audit[0]["ts"])
         updated_at = _datetime(case.audit[-1]["ts"])
-        with self.connection:
-            self.connection.execute(
+        new_version: int
+        with self._lock, self.connection:
+            current = self.connection.execute(
+                "SELECT version, patient_user_id FROM cases WHERE id = ?", (case.id,)
+            ).fetchone()
+            if current is None:
+                if expected_version not in (None, 0) or case.version not in (0,):
+                    raise ConcurrencyConflict(f"case {case.id} was created by another request")
+                new_version = 1
+                self.connection.execute(
                 """
                 INSERT INTO cases
                     (id, patient_user_id, pathway, state, entered_at, owner, urgent, closed,
-                     created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    patient_user_id = COALESCE(excluded.patient_user_id, cases.patient_user_id),
-                    pathway = excluded.pathway,
-                    state = excluded.state,
-                    entered_at = excluded.entered_at,
-                    owner = excluded.owner,
-                    urgent = excluded.urgent,
-                    closed = excluded.closed,
-                    created_at = excluded.created_at,
-                    updated_at = excluded.updated_at
+                      created_at, updated_at, version)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     case.id,
@@ -1426,14 +1861,51 @@ class SQLiteStore:
                     int(case.closed),
                     _iso(created_at),
                     _iso(updated_at),
+                    new_version,
                 ),
             )
+                existing_count = 0
+            else:
+                current_version = int(current["version"])
+                compare_version = case.version if expected_version is None else expected_version
+                if current_version != compare_version:
+                    raise ConcurrencyConflict(
+                        f"case {case.id} changed from version {compare_version} to {current_version}; reload and retry"
+                    )
+                existing_count = int(
+                    self.connection.execute(
+                        "SELECT COUNT(*) FROM audit_events WHERE case_id = ?", (case.id,)
+                    ).fetchone()[0]
+                )
+                if existing_count > len(case.audit):
+                    raise ConcurrencyConflict(f"case {case.id} has newer audit history")
+                new_version = current_version + 1
+                updated = self.connection.execute(
+                    """
+                    UPDATE cases
+                    SET patient_user_id = COALESCE(?, patient_user_id), pathway = ?, state = ?,
+                        entered_at = ?, owner = ?, urgent = ?, closed = ?, created_at = ?,
+                        updated_at = ?, version = version + 1
+                    WHERE id = ? AND version = ?
+                    """,
+                    (
+                        patient_user_id,
+                        case.pw.name,
+                        case.state,
+                        _iso(case.entered),
+                        case.owner,
+                        int(case.urgent),
+                        int(case.closed),
+                        _iso(created_at),
+                        _iso(updated_at),
+                        case.id,
+                        current_version,
+                    ),
+                )
+                if updated.rowcount != 1:
+                    raise ConcurrencyConflict(f"case {case.id} changed during save; retry with a fresh case")
 
-            self.connection.execute(
-                "DELETE FROM audit_events WHERE case_id = ? AND sequence >= ?",
-                (case.id, len(case.audit)),
-            )
-            for sequence, event in enumerate(case.audit):
+            for sequence, event in enumerate(case.audit[existing_count:], existing_count):
                 approval_id = self._save_audit_approval(case.id, sequence, event)
                 evidence = list(event.get("evidence", []))
                 metadata = {
@@ -1448,15 +1920,7 @@ class SQLiteStore:
                         (case_id, sequence, occurred_at, actor, action, from_state, to_state,
                          evidence_json, approval_id, metadata_json)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(case_id, sequence) DO UPDATE SET
-                        occurred_at = excluded.occurred_at,
-                        actor = excluded.actor,
-                        action = excluded.action,
-                        from_state = excluded.from_state,
-                        to_state = excluded.to_state,
-                        evidence_json = excluded.evidence_json,
-                        approval_id = excluded.approval_id,
-                        metadata_json = excluded.metadata_json
+                    ON CONFLICT(case_id, sequence) DO NOTHING
                     """,
                     (
                         case.id,
@@ -1474,19 +1938,30 @@ class SQLiteStore:
 
             provenance = self._evidence_provenance(case)
             for kind in sorted(case.evidence):
-                recorded_at, recorded_by = provenance.get(kind, (created_at, "system"))
+                recorded_at, recorded_by, recorded_role, state, evidence_metadata = provenance.get(
+                    kind, (created_at, "system", None, None, {})
+                )
                 self.connection.execute(
                     """
-                    INSERT INTO evidence (id, case_id, kind, recorded_at, recorded_by, details_json)
-                    VALUES (?, ?, ?, ?, ?, '{}')
-                    ON CONFLICT(id) DO UPDATE SET
-                        case_id = excluded.case_id,
-                        kind = excluded.kind,
-                        recorded_at = excluded.recorded_at,
-                        recorded_by = excluded.recorded_by
+                    INSERT INTO evidence
+                        (id, case_id, kind, recorded_at, recorded_by, recorded_role, state,
+                         action, provenance_json, details_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '{}')
+                    ON CONFLICT(id) DO NOTHING
                     """,
-                    (f"{case.id}:{kind}", case.id, kind, _iso(recorded_at), recorded_by),
+                    (
+                        f"{case.id}:{kind}",
+                        case.id,
+                        kind,
+                        _iso(recorded_at),
+                        recorded_by,
+                        recorded_role,
+                        state,
+                        evidence_metadata.get("action"),
+                        _json(evidence_metadata),
+                    ),
                 )
+        case.version = new_version
 
     def _save_audit_approval(self, case_id: str, sequence: int, event: Mapping[str, Any]) -> str | None:
         approval = event.get("approval")
@@ -1495,16 +1970,16 @@ class SQLiteStore:
         role = str(approval.get("role", ""))
         note = str(approval.get("note", ""))
         approval_id = f"{case_id}:approval:{sequence}"
+        approval_provenance = dict(approval.get("provenance") or {})
+        principal_id = str(approval.get("principal_id") or event.get("actor"))
+        state = str(approval.get("state") or event.get("from") or "")
         self.connection.execute(
             """
-            INSERT INTO approvals (id, case_id, action, role, approver_name, note, recorded_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                action = excluded.action,
-                role = excluded.role,
-                approver_name = excluded.approver_name,
-                note = excluded.note,
-                recorded_at = excluded.recorded_at
+            INSERT INTO approvals
+                (id, case_id, action, role, approver_name, note, recorded_at,
+                 principal_id, state, provenance_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO NOTHING
             """,
             (
                 approval_id,
@@ -1514,16 +1989,39 @@ class SQLiteStore:
                 approval.get("name"),
                 note,
                 _iso(event["ts"]),
+                principal_id,
+                state,
+                _json(approval_provenance),
             ),
         )
         return approval_id
 
     @staticmethod
-    def _evidence_provenance(case: Case) -> dict[str, tuple[datetime, str]]:
-        result: dict[str, tuple[datetime, str]] = {}
+    def _evidence_provenance(case: Case) -> dict[str, tuple[datetime, str, str | None, str | None, Mapping[str, Any]]]:
+        result: dict[str, tuple[datetime, str, str | None, str | None, Mapping[str, Any]]] = {}
         for event in case.audit:
             for kind in event.get("evidence", []):
-                result.setdefault(kind, (_datetime(event["ts"]), str(event["actor"])))
+                details = next(
+                    (
+                        item
+                        for item in event.get("evidence_provenance", [])
+                        if isinstance(item, Mapping) and item.get("kind") == kind
+                    ),
+                    {},
+                )
+                result.setdefault(
+                    kind,
+                    (
+                        _datetime(event["ts"]),
+                        str(details.get("principal_id") or event["actor"]),
+                        details.get("role") or event.get("actor_role"),
+                        details.get("state") or event.get("from"),
+                        {
+                            **dict(details.get("provenance") or {}),
+                            "action": details.get("action") or "transition",
+                        },
+                    ),
+                )
         return result
 
     def load_case(self, case_id: str, pathway: Pathway) -> Case:
@@ -1540,6 +2038,7 @@ class SQLiteStore:
         case.state = row["state"]
         case.entered = _datetime(row["entered_at"])
         case.owner = row["owner"]
+        case.version = int(row["version"])
 
         if case.state not in pathway.states and case.state not in pathway.terminal:
             raise ValueError(f"persisted case has unknown state: {case.state}")
@@ -1616,9 +2115,38 @@ class SQLiteStore:
             if _instant(consent.granted_at) > _instant(check_at):
                 continue
             if consent.expires_at is not None and _instant(consent.expires_at) <= _instant(check_at):
+                self._record_consent_expiry(consent, check_at)
                 continue
             return True
         return False
+
+    def _record_consent_expiry(self, consent: Consent, occurred_at: datetime) -> None:
+        """Retain the first observed expiry without changing the current grant row."""
+
+        with self._lock, self.connection:
+            rows = self.connection.execute(
+                "SELECT provenance_json FROM consent_history WHERE consent_id = ?",
+                (consent.id,),
+            ).fetchall()
+            if any(_from_json(row["provenance_json"], {}).get("event") == "expired" for row in rows):
+                return
+            self.connection.execute(
+                """
+                INSERT INTO consent_history
+                    (consent_id, user_id, case_id, consent_type, status, occurred_at,
+                     expires_at, source, principal_id, provenance_json)
+                VALUES (?, ?, ?, ?, 'withdrawn', ?, ?, 'consent_expiry', NULL, ?)
+                """,
+                (
+                    consent.id,
+                    consent.user_id,
+                    consent.case_id,
+                    consent.consent_type,
+                    _iso(consent.expires_at or occurred_at),
+                    _optional_iso(consent.expires_at),
+                    _json({"event": "expired", "expired_at": _iso(consent.expires_at or occurred_at)}),
+                ),
+            )
 
     def record_access(
         self,
@@ -1695,31 +2223,35 @@ class SQLiteStore:
         created_at: datetime | str | None = None,
         dedupe_key: str | None = None,
         consent_user_id: str | None = None,
+        provenance: Mapping[str, Any] | None = None,
     ) -> str:
         now = _datetime(created_at) if created_at is not None else datetime.now(timezone.utc)
         available_at = available_at or now
-        if case_id is not None and not self.has_valid_consent(
-            case_id,
-            user_id=consent_user_id,
-            now=now,
-        ):
-            raise ValueError("case notification requires a granted, unexpired case/user consent")
         notification_id = notification_id or f"notification:{event}:{case_id or 'global'}:{_iso(now)}"
-        with self.connection:
+        with self._lock, self.connection:
+            if case_id is not None and not self.has_valid_consent(
+                case_id,
+                user_id=consent_user_id,
+                now=now,
+            ):
+                raise ValueError("case notification requires a granted, unexpired case/user consent")
+            existing = self.connection.execute(
+                "SELECT * FROM notification_outbox WHERE id = ?", (notification_id,)
+            ).fetchone()
+            if existing is not None:
+                return notification_id
+            if dedupe_key:
+                duplicate = self.connection.execute(
+                    "SELECT id FROM notification_outbox WHERE dedupe_key = ?", (dedupe_key,)
+                ).fetchone()
+                if duplicate is not None:
+                    return str(duplicate["id"])
             self.connection.execute(
                 """
                 INSERT INTO notification_outbox
                     (id, case_id, event, channel, recipient, payload_json, status,
-                     available_at, created_at, dedupe_key)
-                VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    case_id = excluded.case_id,
-                    event = excluded.event,
-                    channel = excluded.channel,
-                    recipient = excluded.recipient,
-                    payload_json = excluded.payload_json,
-                    available_at = excluded.available_at,
-                    dedupe_key = excluded.dedupe_key
+                     available_at, created_at, dedupe_key, provenance_json)
+                VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)
                 """,
                 (
                     notification_id,
@@ -1731,6 +2263,7 @@ class SQLiteStore:
                     _iso(available_at),
                     _iso(now),
                     dedupe_key,
+                    _json(provenance or {}),
                 ),
             )
         return notification_id
@@ -1786,12 +2319,20 @@ class SQLiteStore:
             approved_at=_datetime(row["approved_at"]) if row["approved_at"] else None,
             approval_note=row["approval_note"],
             notification_id=row["notification_id"],
+            created_role=row["created_role"],
+            created_state=row["created_state"],
+            created_provenance=_from_json(row["created_provenance_json"], {}),
+            approved_role=row["approved_role"],
+            approved_principal_id=row["approved_principal_id"],
+            approved_state=row["approved_state"],
+            approved_provenance=_from_json(row["approved_provenance_json"], {}),
         )
 
     @staticmethod
     def _outbox_row(row: sqlite3.Row) -> dict[str, Any]:
         result = dict(row)
         result["payload"] = _from_json(result.pop("payload_json"), {})
+        result["provenance"] = _from_json(result.get("provenance_json", "{}"), {})
         return result
 
 

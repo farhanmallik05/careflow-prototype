@@ -5,18 +5,18 @@
 See: `.planning/PROJECT.md` (updated 2026-10-19)
 
 **Core value:** Patients and care teams can move a screening case safely from result to documented next action or closure, with every responsibility, permission, decision, and communication traceable.
-**Current focus:** Phase 3 — Identity & Secure Session Boundary
+**Current focus:** Phase 5 — Observability & Server-Rendered HTTP Safety
 
 ## Current Position
 
-Phase: 2 of 7 (SQLite Lifecycle & Recovery Foundation)
+Phase: 4 of 7 (Authorization, Case Integrity & Consent-Gated Messaging)
 Plan: Complete
 Status: Complete
-Last activity: 2026-10-19 — Added ordered SQLite migrations, fail-closed readiness, UTC normalization, and verified online backup/restore commands.
+Last activity: 2026-10-19 — Added deny-by-default route policy, principal-bound mutations, patient-safe projections, compare-and-swap case writes, consent history, and idempotent local messaging.
 
-Progress: ██░░░░░░░░ 29%
-Roadmap progress: 2/7 phases complete; 12/54 requirements validated
-Next action: Plan Phase 3 — Identity & Secure Session Boundary.
+Progress: █████░░░░░ 57%
+Roadmap progress: 4/7 phases complete; Phase 4 authorization and integrity requirements validated locally
+Next action: Plan Phase 5 — Observability & Server-Rendered HTTP Safety.
 
 ## Performance Metrics
 

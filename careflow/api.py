@@ -46,6 +46,8 @@ from careflow.oidc import (
 )
 from careflow.persistence import (
     CURRENT_SCHEMA_VERSION,
+    ConcurrencyConflict,
+    Consent,
     MessageDraftRecord,
     SessionRecord,
     SQLiteStore,
@@ -64,6 +66,22 @@ DEFAULT_SESSION_MAX_AGE = 3600
 DEFAULT_SESSION_IDLE_AGE = 3600
 DEFAULT_SESSION_ABSOLUTE_AGE = 28800
 CSRF_HEADER = "x-csrf-token"
+
+# Every protected surface names its policy explicitly.  Route aliases point at
+# the same surface, so JSON and HTML cannot accidentally drift into different
+# authorization decisions.  Unknown surfaces are denied by the helper below.
+ROUTE_ACTION_POLICY: dict[str, dict[str, str]] = {
+    "case": {"patient": "linked-safe-read", "staff": "assigned-or-team-read"},
+    "case-mutation": {"staff": "assigned-owner-or-approver"},
+    "patient-collection": {"patient": "self-only-safe", "staff": "assigned-or-team-read"},
+    "worklist": {"staff": "assigned-or-team-collection"},
+    "metrics": {"staff": "assigned-or-team-collection"},
+    "draft": {"staff": "assigned-owner-or-approver"},
+    "draft-read": {"staff": "assigned-or-team-read"},
+    "audit": {"staff": "assigned-or-team-read"},
+    "access-log": {"staff": "assigned-or-team-read"},
+    "consent": {"patient": "linked-self-mutation", "staff": "assigned-owner-or-approver"},
+}
 
 
 _template_environment = Environment(
@@ -246,6 +264,26 @@ class MessageApprovalInput(BaseModel):
     @classmethod
     def non_blank_note(cls, value: str) -> str:
         return _required_text(value, "note")
+
+
+class ConsentInput(BaseModel):
+    """A patient-controlled case-scoped consent decision."""
+
+    status: str
+    consent_type: str = "care_coordination"
+    expires_at: datetime | None = None
+
+    @field_validator("status", "consent_type")
+    @classmethod
+    def non_blank_consent_text(cls, value: str, info: Any) -> str:
+        return _required_text(value, info.field_name).lower()
+
+    @field_validator("status")
+    @classmethod
+    def supported_status(cls, value: str) -> str:
+        if value not in {"granted", "withdrawn", "pending"}:
+            raise ValueError("consent status must be granted, withdrawn, or pending")
+        return value
 
 
 def _jsonable(value: Any) -> Any:
@@ -432,8 +470,6 @@ def _case_view_context(store: SQLiteStore, payload: dict[str, Any], case: Case) 
 
 
 def _patient_case_view(payload: dict[str, Any]) -> dict[str, Any]:
-    next_actions = _next_action_views(payload.get("next", {}))
-    recommended = next_actions[0] if next_actions else None
     return {
         "id": payload["id"],
         "case_url": f"/cases/{quote(payload['id'], safe='')}",
@@ -442,8 +478,19 @@ def _patient_case_view(payload: dict[str, Any]) -> dict[str, Any]:
         "updated_at": _format_datetime(payload.get("updated_at")),
         "urgent": bool(payload.get("urgent")),
         "closed": bool(payload.get("closed")),
-        "recommended": recommended,
     }
+
+
+def _patient_safe_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return only the patient-facing status projection."""
+
+    return _patient_case_view(payload)
+
+
+def _patient_identity_payload(user: User) -> dict[str, Any]:
+    """Expose only identity fields needed by the patient's own status page."""
+
+    return {"name": user.name, "role": "patient"}
 
 
 def _simulation_view(simulation: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -494,6 +541,13 @@ def _message_draft_payload(draft: MessageDraftRecord) -> dict[str, Any]:
         "approved_at": draft.approved_at.isoformat() if draft.approved_at else None,
         "approval_note": draft.approval_note,
         "notification_id": draft.notification_id,
+        "created_role": draft.created_role,
+        "created_state": draft.created_state,
+        "created_provenance": _jsonable(draft.created_provenance),
+        "approved_role": draft.approved_role,
+        "approved_principal_id": draft.approved_principal_id,
+        "approved_state": draft.approved_state,
+        "approved_provenance": _jsonable(draft.approved_provenance),
     }
 
 
@@ -523,6 +577,7 @@ def _case_payload(store: SQLiteStore, case: Case, now: datetime) -> dict[str, An
         "entered_at": case.entered,
         "created_at": case.audit[0]["ts"],
         "updated_at": case.audit[-1]["ts"],
+        "version": case.version,
         "evidence": sorted(case.evidence),
         "audit": case.audit,
     }
@@ -666,6 +721,17 @@ def create_app(
             content={"error": "transition_error", "detail": message},
         )
 
+    @app.exception_handler(ConcurrencyConflict)
+    async def concurrency_error_handler(_: Any, exc: ConcurrencyConflict) -> JSONResponse:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": "concurrency_conflict",
+                "detail": str(exc),
+                "action": "reload the current case and retry the mutation",
+            },
+        )
+
     @app.exception_handler(HTTPException)
     async def http_exception_handler(request: Request, exc: HTTPException) -> Response:
         if _request_wants_html(request):
@@ -721,12 +787,61 @@ def create_app(
         if user.role == "patient":
             raise HTTPException(status_code=403, detail="patients cannot access operational views")
 
-    def authorize_case_access(user: User, case_id: str) -> dict[str, Any]:
+    def _staff_case_in_scope(user: User, record: Mapping[str, Any]) -> bool:
+        """Documented pilot team scope: assigned owner, current owner team, or approver team."""
+
+        if user.role == "patient":
+            return False
+        state = str(record.get("state", ""))
+        owner_role = resolved_pathway.states.get(state, {}).get("owner")
+        team_roles = {
+            str(state_data.get("owner"))
+            for state_data in resolved_pathway.states.values()
+            if state_data.get("owner")
+        }
+        return bool(
+            record.get("owner") == user.id
+            or user.role == owner_role
+            or user.role in team_roles
+            or user.role in resolved_pathway.approvers
+        )
+
+    def _staff_can_mutate_case(user: User, record: Mapping[str, Any]) -> bool:
+        """Mutations require the assigned principal or a declared approver role."""
+
+        return user.role != "patient" and bool(
+            record.get("owner") == user.id or user.role in resolved_pathway.approvers
+        )
+
+    def authorize_surface(user: User, surface: str, *, record: Mapping[str, Any] | None = None, mutation: bool = False) -> None:
+        """Apply the explicit deny-by-default route/action policy."""
+
+        policy = ROUTE_ACTION_POLICY.get(surface)
+        if policy is None:
+            raise HTTPException(status_code=403, detail="route surface is not authorized")
+        if record is None:
+            if user.role == "patient" and "patient" not in policy:
+                raise HTTPException(status_code=403, detail="patients cannot access this surface")
+            if user.role != "patient" and "staff" not in policy:
+                raise HTTPException(status_code=403, detail="staff cannot access this surface")
+            return
+        if user.role == "patient":
+            if mutation and policy.get("patient") != "linked-self-mutation":
+                raise HTTPException(status_code=403, detail="patients cannot mutate this surface")
+            if policy.get("patient") in {"linked-safe-read", "self-only-safe", "linked-self-mutation"}:
+                if record.get("patient_user_id") != user.id:
+                    raise HTTPException(status_code=403, detail="patients may access only their own case")
+                return
+            raise HTTPException(status_code=403, detail="patients cannot access this surface")
+        allowed = _staff_can_mutate_case(user, record) if mutation else _staff_case_in_scope(user, record)
+        if not allowed:
+            raise HTTPException(status_code=403, detail="case is outside the authenticated staff scope")
+
+    def authorize_case_access(user: User, case_id: str, *, mutation: bool = False) -> dict[str, Any]:
         record = store.get_case_record(case_id)
         if record is None:
             raise HTTPException(status_code=404, detail=f"case not found: {case_id}")
-        if user.role == "patient" and record.get("patient_user_id") != user.id:
-            raise HTTPException(status_code=403, detail="patients may access only their own case")
+        authorize_surface(user, "case-mutation" if mutation else "case", record=record, mutation=mutation)
         return record
 
     def active_owner_for_state(state: str, preferred_user_id: str | None = None) -> str:
@@ -756,10 +871,10 @@ def create_app(
         approval_role = approval.get("role") if approval else None
         if approval is not None and approval_role != user.role:
             raise HTTPException(status_code=403, detail="documented approval must match the authenticated user's role")
-        if user.role == owner_role:
+        if user.role == owner_role and case.owner == user.id:
             return
         if user.role not in case.pw.approvers:
-            raise HTTPException(status_code=403, detail=f"role '{user.role}' cannot transition from {case.state}")
+            raise HTTPException(status_code=403, detail="only the assigned owner or an authorized approver may transition this case")
         if not approval or approval_role != user.role or not approval.get("note"):
             raise HTTPException(
                 status_code=403,
@@ -769,16 +884,60 @@ def create_app(
     def authorize_message_approval(user: User, case: Case) -> None:
         """Keep message approval under the same owner/approver role boundary."""
 
-        if user.role == "patient":
-            raise HTTPException(status_code=403, detail="patients cannot approve message drafts")
-        allowed_roles = set(resolved_pathway.approvers)
-        if not case.closed:
-            allowed_roles.add(resolved_pathway.states[case.state]["owner"])
-        if user.role not in allowed_roles:
+        record = store.get_case_record(case.id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="case not found")
+        if not _staff_can_mutate_case(user, record):
             raise HTTPException(
                 status_code=403,
-                detail=f"role '{user.role}' cannot approve a message draft for {case.state}",
+                detail=f"the authenticated principal cannot approve a message draft for {case.state}",
             )
+
+    def server_approval(user: User, case: Case, request_approval: ApprovalInput | None, timestamp: datetime) -> dict[str, Any] | None:
+        """Build approval provenance from the verified session, never caller labels."""
+
+        if request_approval is None:
+            return None
+        return {
+            "role": user.role,
+            "name": user.name,
+            "principal_id": user.id,
+            "state": case.state,
+            "timestamp": timestamp.isoformat(),
+            "note": request_approval.note,
+            "provenance": {
+                "source": "authenticated_session",
+                "principal_id": user.id,
+                "role": user.role,
+                "state": case.state,
+                "timestamp": timestamp.isoformat(),
+            },
+        }
+
+    def server_evidence(
+        user: User,
+        case: Case,
+        action: str,
+        evidence: list[str],
+        timestamp: datetime,
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "kind": kind,
+                "case_id": case.id,
+                "action": action,
+                "state": case.state,
+                "role": user.role,
+                "principal_id": user.id,
+                "recorded_at": timestamp.isoformat(),
+                "provenance": {
+                    "source": "authenticated_session",
+                    "principal_id": user.id,
+                    "action": action,
+                },
+            }
+            for kind in evidence
+        ]
 
     def log_case_access(
         user: User,
@@ -799,6 +958,10 @@ def create_app(
     def user_response(user: User) -> dict[str, Any]:
         payload = _user_payload(user)
         return {"user": payload, **payload}
+
+    def case_response(user: User, case: Case, timestamp: datetime) -> dict[str, Any]:
+        payload = _case_payload(store, case, timestamp)
+        return _patient_safe_payload(payload) if user.role == "patient" else payload
 
     def set_session_cookie(response: Response, user: User) -> str:
         timestamp = now()
@@ -1014,6 +1177,7 @@ def create_app(
     @app.post("/cases", status_code=201)
     def create_case(request: CreateCaseInput, http_request: Request) -> dict[str, Any]:
         user = authenticated_user(http_request)
+        authorize_surface(user, "case-mutation", mutation=True)
         case_id = request.identifier
         if store.get_case_record(case_id) is not None:
             raise HTTPException(status_code=409, detail=f"case already exists: {case_id}")
@@ -1040,21 +1204,33 @@ def create_app(
             owner=initial_owner,
             actor=user.id,
         )
+        case.audit[0].update(
+            {
+                "actor_role": user.role,
+                "provenance": {
+                    "source": "authenticated_session",
+                    "principal_id": user.id,
+                    "role": user.role,
+                    "state": case.state,
+                    "timestamp": timestamp.isoformat(),
+                },
+            }
+        )
         try:
             store.save_case(case, patient_user_id=patient_user_id)
         except sqlite3.IntegrityError as exc:
             raise HTTPException(status_code=422, detail=f"invalid case references: {exc}") from exc
         log_case_access(user, case.id, "mutation", "/cases")
-        return _case_payload(store, case, timestamp)
+        return case_response(user, case, timestamp)
 
     @app.post("/cases/{case_id}/transition", status_code=200)
     @app.post("/cases/{case_id}/transitions", status_code=200, include_in_schema=False)
     def transition_case(case_id: str, request: TransitionInput, http_request: Request) -> dict[str, Any]:
         user = authenticated_user(http_request)
         case = _load_case(store, resolved_pathway, case_id)
-        authorize_case_access(user, case_id)
+        authorize_case_access(user, case_id, mutation=True)
         timestamp = now()
-        approval = request.approval.model_dump(exclude_none=True) if request.approval else None
+        approval = server_approval(user, case, request.approval, timestamp)
         authorize_transition(user, case, approval)
         # The engine is the only component allowed to validate or mutate the
         # state machine.  In particular, do not set case.state in this route.
@@ -1066,17 +1242,17 @@ def create_app(
             approval=approval,
             actor_role=user.role,
             next_owner=next_owner_for_transition(case, request.action),
+            evidence_provenance=server_evidence(user, case, request.action, request.evidence, timestamp),
         )
-        store.save_case(case)
+        store.save_case(case, expected_version=case.version)
         log_case_access(user, case.id, "mutation", f"/cases/{case_id}/transition")
-        return _case_payload(store, case, timestamp)
+        return case_response(user, case, timestamp)
 
     @app.post("/cases/{case_id}/assign", status_code=200)
     def assign_case(case_id: str, request: AssignInput, http_request: Request) -> dict[str, Any]:
         user = authenticated_user(http_request)
         case = _load_case(store, resolved_pathway, case_id)
-        authorize_case_access(user, case_id)
-        operational_user(user)
+        record = authorize_case_access(user, case_id, mutation=True)
         timestamp = now()
         if case.closed:
             raise HTTPException(status_code=409, detail="case is closed")
@@ -1089,10 +1265,16 @@ def create_app(
                 status_code=422,
                 detail=f"assignment target must have role '{expected_role}'",
             )
-        case.assign(target.id, user.id, timestamp)
-        store.save_case(case)
+        case.assign(
+            target.id,
+            user.id,
+            timestamp,
+            actor_role=user.role,
+            provenance={"source": "authenticated_session", "principal_id": user.id},
+        )
+        store.save_case(case, expected_version=case.version)
         log_case_access(user, case.id, "mutation", f"/cases/{case_id}/assign")
-        return _case_payload(store, case, timestamp)
+        return case_response(user, case, timestamp)
 
     @app.post("/cases/{case_id}/message-drafts", status_code=201)
     @app.post("/cases/{case_id}/drafts", status_code=201, include_in_schema=False)
@@ -1111,7 +1293,7 @@ def create_app(
         user = authenticated_user(http_request)
         case = _load_case(store, resolved_pathway, case_id)
         record = authorize_case_access(user, case_id)
-        operational_user(user)
+        authorize_case_access(user, case_id, mutation=True)
         request = request or MessageDraftInput()
         patient = store.get_user(record.get("patient_user_id")) if record.get("patient_user_id") else None
         context = {
@@ -1148,6 +1330,15 @@ def create_app(
                 review_flag=review_flag,
                 created_by=user.id,
                 created_at=timestamp,
+                created_role=user.role,
+                created_state=case.state,
+                created_provenance={
+                    "source": "authenticated_session",
+                    "principal_id": user.id,
+                    "role": user.role,
+                    "state": case.state,
+                    "timestamp": timestamp.isoformat(),
+                },
             )
         except (KeyError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -1172,6 +1363,8 @@ def create_app(
         user = authenticated_user(http_request)
         _load_case(store, resolved_pathway, case_id)
         authorize_case_access(user, case_id)
+        if user.role == "patient":
+            raise HTTPException(status_code=403, detail="patients cannot access message drafts")
         normalized_status = status.strip().lower().replace(" ", "_") if status else None
         try:
             drafts = store.list_message_drafts(case_id=case_id, status=normalized_status)
@@ -1188,7 +1381,9 @@ def create_app(
         case_id: str | None = None,
     ) -> list[dict[str, Any]]:
         user = authenticated_user(http_request)
-        operational_user(user)
+        authorize_surface(user, "draft-read")
+        if user.role == "patient":
+            raise HTTPException(status_code=403, detail="patients cannot access the draft collection")
         if case_id is not None:
             _load_case(store, resolved_pathway, case_id)
             authorize_case_access(user, case_id)
@@ -1197,9 +1392,14 @@ def create_app(
             drafts = store.list_message_drafts(case_id=case_id, status=normalized_status)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        for draft_case_id in sorted({draft.case_id for draft in drafts}):
+        visible = []
+        for draft in drafts:
+            record = store.get_case_record(draft.case_id)
+            if record is not None and _staff_case_in_scope(user, record):
+                visible.append(draft)
+        for draft_case_id in sorted({draft.case_id for draft in visible}):
             log_case_access(user, draft_case_id, "read", "/message-drafts")
-        return [_message_draft_payload(draft) for draft in drafts]
+        return [_message_draft_payload(draft) for draft in visible]
 
     @app.get("/message-drafts/{draft_id}", status_code=200)
     def get_message_draft(draft_id: str, http_request: Request) -> dict[str, Any]:
@@ -1207,6 +1407,8 @@ def create_app(
         draft = store.get_message_draft(draft_id)
         if draft is None:
             raise HTTPException(status_code=404, detail=f"message draft not found: {draft_id}")
+        if user.role == "patient":
+            raise HTTPException(status_code=403, detail="patients cannot access message drafts")
         _load_case(store, resolved_pathway, draft.case_id)
         authorize_case_access(user, draft.case_id)
         log_case_access(user, draft.case_id, "read", f"/message-drafts/{draft_id}")
@@ -1234,9 +1436,6 @@ def create_app(
         case = _load_case(store, resolved_pathway, draft.case_id)
         authorize_case_access(user, draft.case_id)
         authorize_message_approval(user, case)
-        if draft.status != "pending_approval":
-            raise HTTPException(status_code=409, detail=f"message draft is already {draft.status}")
-
         patient_user_id = draft.patient_user_id or (store.get_case_record(draft.case_id) or {}).get(
             "patient_user_id"
         )
@@ -1256,6 +1455,15 @@ def create_app(
                 approval_note=approval.note,
                 recipient=patient.email or patient.id,
                 consent_user_id=patient.id,
+                approved_role=user.role,
+                approved_state=case.state,
+                approved_provenance={
+                    "source": "authenticated_session",
+                    "principal_id": user.id,
+                    "role": user.role,
+                    "state": case.state,
+                    "timestamp": timestamp.isoformat(),
+                },
                 payload={
                     "patient_user_id": patient.id,
                     "review_required": draft.review_required,
@@ -1263,7 +1471,7 @@ def create_app(
             )
         except ValueError as exc:
             detail = str(exc)
-            if "consent" in detail.lower():
+            if "granted, unexpired" in detail.lower() or "requires a granted" in detail.lower():
                 raise HTTPException(status_code=403, detail=detail) from exc
             raise HTTPException(status_code=409, detail=detail) from exc
         log_case_access(
@@ -1277,13 +1485,121 @@ def create_app(
         result["notification"] = _jsonable(notification)
         return result
 
+    @app.get("/cases/{case_id}/audit", status_code=200)
+    @app.get("/audit/{case_id}", status_code=200, include_in_schema=False)
+    def get_case_audit(case_id: str, http_request: Request) -> list[dict[str, Any]]:
+        user = authenticated_user(http_request)
+        case = _load_case(store, resolved_pathway, case_id)
+        authorize_case_access(user, case_id)
+        if user.role == "patient":
+            raise HTTPException(status_code=403, detail="patients cannot access operational audit history")
+        log_case_access(user, case_id, "read", f"/cases/{case_id}/audit")
+        return _jsonable(case.audit)
+
+    @app.get("/cases/{case_id}/access-logs", status_code=200)
+    @app.get("/cases/{case_id}/access-log", status_code=200, include_in_schema=False)
+    def get_case_access_logs(case_id: str, http_request: Request) -> list[dict[str, Any]]:
+        user = authenticated_user(http_request)
+        _load_case(store, resolved_pathway, case_id)
+        authorize_case_access(user, case_id)
+        if user.role == "patient":
+            raise HTTPException(status_code=403, detail="patients cannot access operational access logs")
+        logs = store.list_access_logs(case_id=case_id)
+        log_case_access(user, case_id, "read", f"/cases/{case_id}/access-logs")
+        return _jsonable([log.__dict__ for log in logs])
+
+    @app.get("/access-logs", status_code=200)
+    @app.get("/access-log", status_code=200, include_in_schema=False)
+    def get_access_logs(http_request: Request, case_id: str | None = None) -> list[dict[str, Any]]:
+        user = authenticated_user(http_request)
+        if user.role == "patient":
+            raise HTTPException(status_code=403, detail="patients cannot access operational access logs")
+        if case_id is not None:
+            _load_case(store, resolved_pathway, case_id)
+            authorize_case_access(user, case_id)
+        logs = store.list_access_logs(case_id=case_id)
+        visible = [
+            log for log in logs
+            if (record := store.get_case_record(log.case_id)) is not None and _staff_case_in_scope(user, record)
+        ]
+        for visible_case_id in sorted({log.case_id for log in visible}):
+            log_case_access(user, visible_case_id, "read", "/access-logs")
+        return _jsonable([log.__dict__ for log in visible])
+
+    @app.post("/cases/{case_id}/consent", status_code=200)
+    @app.post("/consents/{case_id}", status_code=200, include_in_schema=False)
+    def set_case_consent(case_id: str, request: ConsentInput, http_request: Request) -> dict[str, Any]:
+        user = authenticated_user(http_request)
+        record = authorize_case_access(user, case_id, mutation=user.role != "patient")
+        patient_id = record.get("patient_user_id")
+        if not patient_id:
+            raise HTTPException(status_code=422, detail="case has no linked patient")
+        if user.role == "patient" and user.id != patient_id:
+            raise HTTPException(status_code=403, detail="patients may manage consent only for their linked case")
+        timestamp = now()
+        consent_id = f"consent:{case_id}:{patient_id}:{request.consent_type}"
+        try:
+            store.add_consent(
+                Consent(
+                    id=consent_id,
+                    user_id=patient_id,
+                    case_id=case_id,
+                    consent_type=request.consent_type,
+                    status=request.status,
+                    granted_at=timestamp,
+                    expires_at=request.expires_at,
+                    source="authenticated_session",
+                    principal_id=user.id,
+                    provenance={
+                        "source": "authenticated_session",
+                        "principal_id": user.id,
+                        "role": user.role,
+                        "case_id": case_id,
+                        "timestamp": timestamp.isoformat(),
+                    },
+                )
+            )
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        log_case_access(user, case_id, "mutation", f"/cases/{case_id}/consent")
+        current = store.list_consents(user_id=patient_id, case_id=case_id)
+        return {
+            "consent": _jsonable(current[-1].__dict__ if current else {}),
+            "history": _jsonable([item.__dict__ for item in store.list_consent_history(case_id=case_id)]),
+        }
+
+    @app.get("/cases/{case_id}/consent-history", status_code=200)
+    @app.get("/consents/{case_id}/history", status_code=200, include_in_schema=False)
+    def get_case_consent_history(case_id: str, http_request: Request) -> list[dict[str, Any]]:
+        user = authenticated_user(http_request)
+        record = authorize_case_access(user, case_id)
+        if user.role == "patient" and record.get("patient_user_id") != user.id:
+            raise HTTPException(status_code=403, detail="patients may access only their own consent history")
+        log_case_access(user, case_id, "read", f"/cases/{case_id}/consent-history")
+        return _jsonable([item.__dict__ for item in store.list_consent_history(case_id=case_id)])
+
     @app.get("/cases/{case_id}", status_code=200)
     def get_case(case_id: str, http_request: Request) -> dict[str, Any]:
         user = authenticated_user(http_request)
         case = _load_case(store, resolved_pathway, case_id)
-        authorize_case_access(user, case_id)
+        record = authorize_case_access(user, case_id)
         payload = _case_payload(store, case, now())
         log_case_access(user, case.id, "read", f"/cases/{case_id}")
+        if user.role == "patient":
+            safe = _patient_safe_payload(payload)
+            if _request_wants_html(http_request):
+                patient_id = str(record.get("patient_user_id"))
+                patient = store.get_user(patient_id)
+                return templates.TemplateResponse(
+                    request=http_request,
+                    name="patient.html",
+                    context={
+                        "user": user,
+                        "patient": patient,
+                        "cases": [safe],
+                    },
+                )
+            return safe
         if _request_wants_html(http_request):
             return templates.TemplateResponse(
                 request=http_request,
@@ -1298,6 +1614,7 @@ def create_app(
     @app.get("/patient/{patient_id}", status_code=200)
     def get_patient(patient_id: str, http_request: Request) -> dict[str, Any]:
         user = authenticated_user(http_request)
+        authorize_surface(user, "patient-collection")
         patient = store.get_user(patient_id)
         if patient is None or not patient.is_active or patient.role != "patient":
             raise HTTPException(status_code=404, detail=f"patient not found: {patient_id}")
@@ -1313,11 +1630,17 @@ def create_app(
         for record in records:
             case = _load_case(store, resolved_pathway, record["id"])
             payload = _case_payload(store, case, timestamp)
-            case_payloads.append(payload)
-            patient_cases.append(_patient_case_view(payload))
+            if user.role != "patient" and not _staff_case_in_scope(user, record):
+                continue
+            safe = _patient_safe_payload(payload)
+            case_payloads.append(safe if user.role == "patient" else payload)
+            patient_cases.append(safe)
             log_case_access(user, case.id, "read", f"/patient/{patient_id}")
 
-        result = {"patient": _user_payload(patient), "cases": case_payloads}
+        result = {
+            "patient": _patient_identity_payload(patient) if user.role == "patient" else _user_payload(patient),
+            "cases": case_payloads,
+        }
         if _request_wants_html(http_request):
             return templates.TemplateResponse(
                 request=http_request,
@@ -1329,9 +1652,11 @@ def create_app(
     @app.get("/worklist", status_code=200)
     def get_worklist(http_request: Request) -> list[dict[str, Any]]:
         user = authenticated_user(http_request)
-        operational_user(user)
+        if user.role == "patient":
+            raise HTTPException(status_code=403, detail="patients cannot access operational views")
+        authorize_surface(user, "worklist")
         timestamp = now()
-        records = store.list_case_records()
+        records = [record for record in store.list_case_records() if _staff_case_in_scope(user, record)]
         cases = [_load_case(store, resolved_pathway, record["id"]) for record in records]
         rows = _jsonable(worklist(cases, timestamp))
         for record in records:
@@ -1351,9 +1676,11 @@ def create_app(
     @app.get("/metrics", status_code=200)
     def get_metrics(http_request: Request) -> dict[str, Any]:
         user = authenticated_user(http_request)
-        operational_user(user)
+        if user.role == "patient":
+            raise HTTPException(status_code=403, detail="patients cannot access operational views")
+        authorize_surface(user, "metrics")
         timestamp = now()
-        records = store.list_case_records()
+        records = [record for record in store.list_case_records() if _staff_case_in_scope(user, record)]
         cases = [_load_case(store, resolved_pathway, record["id"]) for record in records]
         rows = worklist(cases, timestamp)
         result = compute_metrics(cases, resolved_pathway, timestamp)

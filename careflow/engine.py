@@ -41,6 +41,11 @@ class Pathway:
 class Case:
     def __init__(self, cid, pathway, now, urgent=False, *, owner=None, actor="system"):
         self.id, self.pw, self.urgent = cid, pathway, urgent
+        # The repository owns this optimistic-concurrency token.  Keeping it on
+        # the aggregate lets an API mutation carry the version it actually read
+        # into the compare-and-swap write without making the pathway engine aware
+        # of SQLite.
+        self.version = 0
         now = _utc(now)
         self.state, self.entered, self.audit, self.evidence = pathway.start, now, [], set()
         self.owner = pathway.states[self.state]["owner"] if owner is None else owner
@@ -53,15 +58,31 @@ class Case:
     def closed(self):
         return self.state in self.pw.terminal
 
-    def assign(self, person, actor, now):
+    def assign(self, person, actor, now, *, actor_role=None, provenance=None):
         if self.closed:
             raise TransitionError("case is closed")
         if not person:
             raise TransitionError("an open case must always have an owner")
-        self._log(now, actor, "assign", self.state, self.state, owner=person)
+        metadata = {"owner": person}
+        if actor_role is not None:
+            metadata["actor_role"] = actor_role
+        if provenance is not None:
+            metadata["provenance"] = provenance
+        self._log(now, actor, "assign", self.state, self.state, **metadata)
         self.owner = person
 
-    def transition(self, action, actor, now, evidence=(), approval=None, *, actor_role=None, next_owner=None):
+    def transition(
+        self,
+        action,
+        actor,
+        now,
+        evidence=(),
+        approval=None,
+        *,
+        actor_role=None,
+        next_owner=None,
+        evidence_provenance=None,
+    ):
         """Move the case. Missing evidence is only waived by a documented approval
         from an authorized human role. AI components never call this with approval."""
         now = _utc(now)
@@ -87,7 +108,12 @@ class Case:
         frm, self.evidence = self.state, have
         self.state, self.entered = t["to"], now
         self.owner = None if self.closed else (next_owner if next_owner is not None else self.pw.states[self.state]["owner"])
-        self._log(now, actor, action, frm, self.state, evidence=sorted(evidence), approval=approval)
+        metadata = {"evidence": sorted(evidence), "approval": approval}
+        if evidence_provenance is not None:
+            metadata["evidence_provenance"] = evidence_provenance
+        if actor_role is not None:
+            metadata["actor_role"] = actor_role
+        self._log(now, actor, action, frm, self.state, **metadata)
 
 def hours(a, b):
     return (_utc(b) - _utc(a)).total_seconds() / 3600

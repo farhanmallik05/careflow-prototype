@@ -36,7 +36,7 @@ SQLiteStore.save_case()  ---> cases + audit_events + evidence + approvals
 JSON payload or server-rendered HTML
 ```
 
-For `POST /cases`, the route constructs a new `Case` at `result_issued`, assigns an active `lab`-role owner, records the opening audit event, and saves it. For a transition, the route rehydrates the snapshot, passes the authenticated user ID and role to the engine, and saves only after the engine accepts the action. The optional request `actor` label is not used as the audit identity. Transition authorization is role-based: the authenticated role must match the current state's owner role, but the assigned owner ID is not an additional transition gate.
+For `POST /cases`, the route constructs a new `Case` at `result_issued`, assigns an active `lab`-role owner, records the opening audit event, and saves it. For a transition, the route rehydrates the snapshot, derives principal, active role, approval, evidence, timestamp, and provenance from the verified session, passes the authoritative decision to the engine, and saves only after the engine accepts the action. The optional request `actor`, approval `role`, and approval `name` labels never authorize a request. Ordinary mutations require the assigned owner; only pathway approvers can act outside that assignment with a server-bound documented approval.
 
 ## Pathway data flow
 
@@ -64,19 +64,34 @@ The pathway allows `clinician_on_call` and `care_coordinator` to submit a matchi
 | Record | Purpose |
 | --- | --- |
 | `users` | Active/inactive demo identities and roles |
-| `cases` | Current snapshot: state, owner, patient link, urgent flag, timestamps |
+| `cases` | Current snapshot: state, owner, patient link, urgent flag, timestamps, optimistic version |
 | `audit_events` | Ordered opening, assignment, and transition history |
 | `evidence` | Case-level evidence kinds and provenance |
-| `approvals` | Human approval role, note, name, and timestamp |
-| `consents` | Patient/case-scoped status and optional expiry |
-| `message_drafts` | Provider output awaiting human approval |
-| `notification_outbox` | consent-gated queued events; no transport worker is present |
+| `approvals` | Human approval role, authenticated principal, state/action binding, provenance, note, and timestamp |
+| `consents` | Current patient/case-scoped status and optional expiry |
+| `consent_history` | Append-only grant, withdrawal, and observed-expiry history |
+| `message_drafts` | Provider output with authenticated creator/approver provenance and explicit review state |
+| `notification_outbox` | Consent-gated local queue with immutable provenance; no transport worker is present |
 | `access_logs` | Successful authenticated case reads and operational reads/mutations |
 | `oidc_identity_links` | Approved exact `(issuer, subject)` to local-user mappings |
 | `oidc_login_states` | One-time state, nonce, redirect, and PKCE verifier transactions |
 | `sessions` | Opaque handle hashes, CSRF hashes, expiry, and revocation metadata |
 
-`save_case` rejects an unknown state, an open case without an owner, or a closed case with an owner before writing. `load_case` rehydrates the stored audit/evidence rather than replaying transitions. The audit is therefore the source used by `careflow.metrics.compute_metrics` for observed measures.
+`save_case` rejects an unknown state, an open case without an owner, or a closed case with an owner before writing. It compares the aggregate's version with the stored version and appends audit/evidence/approval provenance without overwriting older records; a losing writer receives a conflict. `load_case` rehydrates the stored audit/evidence rather than replaying transitions. The audit is therefore the source used by `careflow.metrics.compute_metrics` for observed measures.
+
+## Phase 4 authorization matrix
+
+The API has an explicit deny-by-default `ROUTE_ACTION_POLICY` for case JSON/HTML, aliases, patient collections, worklist, metrics, drafts, audits, access logs, and consent surfaces. Aliases call the same handler and therefore make the same decision before serialization.
+
+| Surface | Patient | Staff read scope | Staff mutation scope |
+| --- | --- | --- | --- |
+| Case JSON/HTML and patient collection | Own linked case only; status projection only | Single-org team scope and assigned cases | Assigned owner or declared approver |
+| Worklist/metrics/draft collection | Denied | Same documented team scope; unauthorized rows omitted | Not applicable |
+| Draft create/approve, assignment, transition | Denied | Assigned/team case must be visible | Assigned owner; approver override requires server-bound approval |
+| Audit/access-log views | Denied | Assigned/team cases only | Not applicable |
+| Consent | Own linked patient case | Assigned/approver staff may record an operational decision | Patient or scoped staff principal; every change is historized |
+
+Patients never receive owner IDs, internal actors, evidence requirements, audit events, approval notes, draft content, access logs, or internal patient identifiers. Staff collection reads are filtered before serialization.
 
 ### SQLite lifecycle and recovery
 
@@ -123,13 +138,13 @@ message_drafts(status=pending_approval)
 message_drafts(status=approved) + notification_outbox(status=queued)
 ```
 
-The default `RuleBasedProvider` supports `en`, `hi`, and `bn`. Hindi and Bengali output carries `needs clinical-language review`. Draft creation does not save the case or append a workflow audit event. Approval checks the current case role boundary and a granted, unexpired consent immediately before the atomic draft/outbox write. No API route sends the queued row.
+The default `RuleBasedProvider` supports `en`, `hi`, and `bn`. Hindi and Bengali output carries `needs clinical-language review`. Draft creation does not save the case or append a workflow audit event. Approval checks the current case role boundary and a granted, unexpired consent immediately before the atomic draft/outbox write. Approval and queue operations are idempotent for the same draft, while withdrawal marks queued notifications and approved drafts `unavailable`; no API route sends the queued row. Drafts remain in explicit generated/pending-approval/approved/queued/failed/unavailable states as applicable.
 
 ## Reads and metrics
 
-`GET /worklist` loads every case, calls `engine.worklist`, and records a successful worklist access for each database case it loads. The worklist includes overdue, attention, or unassigned open cases and sorts urgent cases before the most overdue cases.
+`GET /worklist` filters cases to the authenticated staff member's documented single-organization team/assignment scope before calling `engine.worklist`, and records a successful worklist access for each visible case. The worklist includes overdue, attention, or unassigned open cases and sorts urgent cases before the most overdue cases.
 
-`GET /metrics` loads every case and calls `compute_metrics` with the configured pathway and current clock. Observed durations, rates, documented closure, overdue counts, and delay/drop-off reasons are calculated from ordered audit events plus pathway rules; current snapshots are not treated as proof of a milestone. The separate `careflow.sim.compare()` table is a deterministic what-if simulation labelled as assumption-based, not clinical evidence.
+`GET /metrics` loads every in-scope case and calls `compute_metrics` with the configured pathway and current clock. Observed durations, rates, documented closure, overdue counts, and delay/drop-off reasons are calculated from ordered audit events plus pathway rules; current snapshots are not treated as proof of a milestone. The separate `careflow.sim.compare()` table is a deterministic what-if simulation labelled as assumption-based, not clinical evidence. Message queueing remains consent-gated and local.
 
 ## Controls at each boundary
 
@@ -137,8 +152,8 @@ The default `RuleBasedProvider` supports `en`, `hi`, and `bn`. Hindi and Bengali
 - **Transport:** Pydantic models reject blank actions, unsupported message languages/templates, and inconsistent IDs.
 - **Authentication:** pilot users complete the configured OIDC authorization-code/PKCE flow; CareFlow verifies issuer, audience, signature/key, expiry, nonce, and required claims, maps the exact `(issuer, subject)` to an approved active role-bearing local user, and issues only an opaque `careflow_session` handle. Demo mode uses the same server-managed store but retains explicit synthetic-user login.
 - **Session boundary:** idle and absolute expiry are enforced on every request, local logout revokes the session without contacting the IdP, and local role/deactivation changes are re-read on every request. Pilot cookie mutations require a configured trusted `Origin` and a session-bound CSRF token.
-- **Authorization:** patients are isolated to their own linked case; worklist/metrics are staff-only; transitions require the current state's owner role or a matching authorized approval (role-based, separate from the owner ID); message approval uses the same owner/approver boundary.
+- **Authorization:** patients are isolated to their own linked case and safe projection; every protected surface is deny-by-default; staff collections are scope-filtered; transitions, assignments, evidence, drafts, approvals, audits, and consent decisions use the authenticated active principal and role, with same-role non-owners denied mutations.
 - **Workflow safety:** the engine rejects illegal actions, closed-case changes, missing required evidence, and unauthorized approvals.
-- **Persistence:** snapshot, audit, evidence, and approval writes are synchronized in a transaction; ownership invariants are checked before write.
-- **Notification safety:** case notifications require granted, unexpired consent and are represented as queued outbox rows only.
+- **Persistence:** snapshot, audit, evidence, and approval writes are synchronized in a transaction with compare-and-swap versions; immutable records carry case/action/state/role/principal/timestamp/provenance bindings.
+- **Notification safety:** case notifications require granted, unexpired consent immediately before queueing; consent history is append-only, withdrawal invalidates local queued work, and no message is represented as sent by the API.
 - **Traceability:** successful reads/mutations are recorded in `access_logs`; workflow mutations are retained in the case audit and related evidence/approval tables.
