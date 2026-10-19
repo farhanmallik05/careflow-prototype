@@ -43,3 +43,11 @@ def test_invalid_boolean_and_mode_are_rejected():
         CareFlowSettings.from_env({"CAREFLOW_SYNTHETIC_ONLY": "maybe"})
     with pytest.raises(ConfigurationError, match="must be 'demo' or 'pilot'"):
         CareFlowSettings.from_env({"CAREFLOW_MODE": "unsafe"})
+
+
+def test_insecure_or_placeholder_session_secret_rejected():
+    with pytest.raises(ConfigurationError, match="default placeholder or insecure secret"):
+        CareFlowSettings.from_env({"CAREFLOW_SESSION_SECRET": "replace-with-a-long-random-secret"})
+    with pytest.raises(ConfigurationError, match="default placeholder or insecure secret"):
+        CareFlowSettings.from_env({"CAREFLOW_SESSION_SECRET": "password"})
+

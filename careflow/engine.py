@@ -102,6 +102,20 @@ class Case:
                 if not approval or approval_role != actor_role or not approval.get("note"):
                     raise TransitionError("an authorized approver must submit a matching documented approval")
         have = self.evidence | set(evidence)
+        if t["to"] in {"closed_refused", "closed_transferred", "closed_unreachable_exhausted"}:
+            has_dual_signoff = False
+            if isinstance(approval, dict):
+                has_dual_signoff = bool(
+                    approval.get("co_signer")
+                    or approval.get("secondary_approval")
+                    or (approval.get("role") in self.pw.approvers and approval.get("note") and "supervisor_signoff" in have)
+                )
+            elif "supervisor_signoff" in have:
+                has_dual_signoff = actor_role in self.pw.approvers
+            if not has_dual_signoff:
+                raise TransitionError(
+                    f"transition to terminal exception '{t['to']}' requires dual clinical supervisor sign-off"
+                )
         missing = [e for e in t.get("requires", []) if e not in have]
         if missing and not (approval and approval.get("role") in self.pw.approvers and approval.get("note")):
             raise TransitionError(f"missing evidence {missing}: provide it or a documented authorized approval")

@@ -100,6 +100,19 @@ class CareFlowSettings:
             raise ConfigurationError("CAREFLOW_DB_PATH must name a database file")
         if self.message_provider not in {"rule_based", "llm", "rules", "offline", ""}:
             raise ConfigurationError("CAREFLOW_MESSAGE_PROVIDER is unsupported")
+        INSECURE_SECRETS = {
+            "replace-with-a-long-random-secret",
+            "secret",
+            "password",
+            "changeme",
+            "admin",
+            "default",
+            "test",
+        }
+        if self.session_secret and self.session_secret.lower() in INSECURE_SECRETS:
+            raise ConfigurationError(
+                "CAREFLOW_SESSION_SECRET must not use a default placeholder or insecure secret"
+            )
         if self.mode == "pilot":
             required = {
                 "CAREFLOW_SESSION_SECRET": self.session_secret,
@@ -116,6 +129,10 @@ class CareFlowSettings:
                 raise ConfigurationError("CAREFLOW_ALLOW_DEMO_LOGIN must be false in pilot mode")
             if not self.synthetic_only:
                 raise ConfigurationError("pilot mode must explicitly retain CAREFLOW_SYNTHETIC_ONLY=true")
+            if len(self.session_secret) < 16 or self.session_secret.lower() in INSECURE_SECRETS:
+                raise ConfigurationError(
+                    "pilot mode requires a secure CAREFLOW_SESSION_SECRET of at least 16 characters"
+                )
 
     @property
     def demo_mode(self) -> bool:

@@ -52,7 +52,7 @@
     {% if case.next_actions %}
       <div class="action-list">
         {% for action in case.next_actions %}
-          <article class="action-item">
+          <article class="action-item" id="action-{{ action.name }}">
             <h3>{{ action.label }}</h3>
             {% if action.evidence %}
               <p><strong>Evidence needed:</strong>
@@ -60,6 +60,21 @@
               </p>
             {% else %}
               <p class="muted">Evidence needed: none listed</p>
+            {% endif %}
+            {% if user and user.role != 'patient' and not case.closed %}
+              <div class="action-controls" style="margin-top: 0.75rem;">
+                <form method="post" action="/cases/{{ case.id }}/transitions"
+                      hx-post="/cases/{{ case.id }}/transitions"
+                      hx-target="#main-content"
+                      hx-select="#main-content"
+                      hx-swap="outerHTML">
+                  <input type="hidden" name="action" value="{{ action.name }}">
+                  <input type="hidden" name="version" value="{{ case.version|default(0) }}">
+                  <button type="submit" class="button primary small" style="cursor: pointer;">
+                    Execute {{ action.label }}
+                  </button>
+                </form>
+              </div>
             {% endif %}
           </article>
         {% endfor %}

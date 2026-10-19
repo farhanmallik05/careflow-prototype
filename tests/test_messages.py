@@ -167,3 +167,43 @@ def test_optional_llm_boundary_is_selected_only_by_environment_and_stays_offline
         assert response.status_code == 503
         assert "not configured" in response.json()["detail"]
         assert client.app.state.store.count("message_drafts") == 0
+
+
+def test_multilingual_credential_gate_restricts_uncertified_draft_approvals(tmp_path):
+    with make_client(tmp_path) as client:
+        patient_case(client, "CASE-HI")
+        grant_consent(client, "CASE-HI")
+        login(client, "demo-lab")
+        created = client.post("/cases/CASE-HI/message-drafts", json={"language": "hi"})
+        assert created.status_code == 201, created.text
+        draft_id = created.json()["id"]
+
+        # 1. Uncertified staff member (demo-lab defaults to ("en",)) is rejected
+        denied = client.post(
+            f"/message-drafts/{draft_id}/approve",
+            json={"note": "Attempted uncertified Hindi approval"},
+        )
+        assert denied.status_code == 403
+        assert "requires certified language qualification" in denied.json()["detail"]
+
+        # 2. Staff member with Hindi language credential can approve
+        from careflow.persistence import User
+        certified_staff = User(
+            id="certified-interpreter",
+            name="Asha Sharma",
+            role="care_coordinator",
+            certified_languages=("en", "hi"),
+        )
+        client.app.state.store.add_user(certified_staff)
+        login(client, "certified-interpreter")
+
+        approved = client.post(
+            f"/message-drafts/{draft_id}/approve",
+            json={"note": "Verified by certified medical interpreter"},
+        )
+        assert approved.status_code == 200, approved.text
+        assert approved.json()["status"] == "approved"
+        assert approved.json()["approved_by"] == "certified-interpreter"
+
+
+

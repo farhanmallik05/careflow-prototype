@@ -147,3 +147,41 @@ def test_seed_is_deterministic_and_covers_pathway_stages(tmp_path):
     assert first_summary["notification_outbox"] > 0
     assert first_cases == second_cases
     assert first_outbox == second_outbox
+
+
+def test_sql_worklist_filtering_and_pagination(tmp_path):
+    db_path = tmp_path / "worklist_test.sqlite"
+    with SQLiteStore(db_path) as store:
+        # Check WAL mode
+        journal_mode = store.connection.execute("PRAGMA journal_mode").fetchone()[0]
+        assert journal_mode.lower() == "wal"
+
+        # Add cases
+        store.add_user(User("p1", "Patient One", "patient", created_at=T0))
+        c1 = Case("C-ACTIVE-1", PW, T0, urgent=False)
+        c2 = Case("C-ACTIVE-2", PW, T0, urgent=True)
+        c3 = Case("C-CLOSED", PW, T0)
+        c3.transition("finish", "care_coordinator", T0 + timedelta(hours=1), evidence=["closure_note"])
+
+        store.save_case(c1, patient_user_id="p1")
+        store.save_case(c2, patient_user_id="p1")
+        store.save_case(c3, patient_user_id="p1")
+
+        # SQL level worklist should filter WHERE closed = 0 and sort urgent first
+        active = store.get_worklist_cases(limit=10, offset=0)
+        assert len(active) == 2
+        assert active[0]["id"] == "C-ACTIVE-2"
+        assert active[1]["id"] == "C-ACTIVE-1"
+        assert store.count_worklist_cases() == 2
+
+        # Filter by urgent=True
+        urgent_only = store.get_worklist_cases(urgent=True)
+        assert len(urgent_only) == 1
+        assert urgent_only[0]["id"] == "C-ACTIVE-2"
+
+        # Pagination test
+        page1 = store.get_worklist_cases(limit=1, offset=0)
+        page2 = store.get_worklist_cases(limit=1, offset=1)
+        assert len(page1) == 1 and page1[0]["id"] == "C-ACTIVE-2"
+        assert len(page2) == 1 and page2[0]["id"] == "C-ACTIVE-1"
+

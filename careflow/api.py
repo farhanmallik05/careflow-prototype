@@ -12,6 +12,8 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import secrets
 import sqlite3
+import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import quote
@@ -54,6 +56,7 @@ from careflow.persistence import (
     User,
 )
 from careflow.sim import compare
+from careflow.worker import OutboxWorker
 
 
 PATHWAY_FILE = Path(__file__).parent / "pathways" / "screening_to_care.yaml"
@@ -644,6 +647,16 @@ def create_app(
         resolved_session_max_age = resolved_settings.session_max_age or DEFAULT_SESSION_MAX_AGE
     if not resolved_session_secret:
         raise ConfigurationError("CAREFLOW_SESSION_SECRET must not be blank")
+    if resolved_session_secret.lower() in {
+        "replace-with-a-long-random-secret",
+        "secret",
+        "password",
+        "changeme",
+        "admin",
+        "default",
+        "test",
+    }:
+        raise ConfigurationError("CAREFLOW_SESSION_SECRET must not use a default placeholder or insecure secret")
     if resolved_session_max_age <= 0:
         raise ValueError("session_max_age must be positive")
     resolved_session_idle_age = session_idle_age
@@ -663,8 +676,14 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        yield
-        store.close()
+        worker = OutboxWorker(store, poll_interval=1.0)
+        await worker.start()
+        app.state.outbox_worker = worker
+        try:
+            yield
+        finally:
+            await worker.stop()
+            store.close()
 
     app = FastAPI(title="CareFlow API", version="2.0", lifespan=lifespan)
     app.state.store = store
@@ -683,10 +702,12 @@ def create_app(
     app.state.oidc_provider = resolved_oidc_provider
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
+    @app.get("/health", include_in_schema=False)
     @app.get("/health/live", include_in_schema=False)
     def health_live() -> dict[str, Any]:
         return {"status": "ok", "mode": resolved_settings.mode}
 
+    @app.get("/ready", include_in_schema=False)
     @app.get("/health/ready", include_in_schema=False)
     def health_ready() -> Response:
         checks: dict[str, Any] = {
@@ -881,8 +902,10 @@ def create_app(
                 detail="an authorized approver must submit a matching documented approval",
             )
 
-    def authorize_message_approval(user: User, case: Case) -> None:
-        """Keep message approval under the same owner/approver role boundary."""
+    def authorize_message_approval(
+        user: User, case: Case, draft: MessageDraftRecord | None = None
+    ) -> None:
+        """Keep message approval under the same owner/approver role boundary and enforce language credentials."""
 
         record = store.get_case_record(case.id)
         if record is None:
@@ -892,6 +915,21 @@ def create_app(
                 status_code=403,
                 detail=f"the authenticated principal cannot approve a message draft for {case.state}",
             )
+        if draft is not None and draft.language not in {"en", "en-US", ""}:
+            certified_langs = getattr(user, "certified_languages", ("en",))
+            is_certified = (
+                draft.language in certified_langs
+                or "all" in certified_langs
+                or user.role in {"medical_interpreter", "certified_translator"}
+            )
+            if not is_certified:
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        f"approving {draft.language} message drafts requires certified language qualification; "
+                        f"user '{user.id}' is certified for: {', '.join(certified_langs)}"
+                    ),
+                )
 
     def server_approval(user: User, case: Case, request_approval: ApprovalInput | None, timestamp: datetime) -> dict[str, Any] | None:
         """Build approval provenance from the verified session, never caller labels."""
@@ -1435,7 +1473,7 @@ def create_app(
             raise HTTPException(status_code=404, detail="message draft is not attached to this case")
         case = _load_case(store, resolved_pathway, draft.case_id)
         authorize_case_access(user, draft.case_id)
-        authorize_message_approval(user, case)
+        authorize_message_approval(user, case, draft=draft)
         patient_user_id = draft.patient_user_id or (store.get_case_record(draft.case_id) or {}).get(
             "patient_user_id"
         )
@@ -1650,13 +1688,24 @@ def create_app(
         return result
 
     @app.get("/worklist", status_code=200)
-    def get_worklist(http_request: Request) -> list[dict[str, Any]]:
+    def get_worklist(
+        http_request: Request,
+        page: int = 1,
+        limit: int = 50,
+        owner: str | None = None,
+        urgent: bool | None = None,
+        state: str | None = None,
+    ) -> list[dict[str, Any]]:
         user = authenticated_user(http_request)
         if user.role == "patient":
             raise HTTPException(status_code=403, detail="patients cannot access operational views")
         authorize_surface(user, "worklist")
         timestamp = now()
-        records = [record for record in store.list_case_records() if _staff_case_in_scope(user, record)]
+        offset = max(0, (page - 1) * limit)
+        sql_records = store.get_worklist_cases(
+            owner=owner, urgent=urgent, state=state, limit=limit, offset=offset
+        )
+        records = [record for record in sql_records if _staff_case_in_scope(user, record)]
         cases = [_load_case(store, resolved_pathway, record["id"]) for record in records]
         rows = _jsonable(worklist(cases, timestamp))
         for record in records:
@@ -1669,6 +1718,9 @@ def create_app(
                     "user": user,
                     "rows": _worklist_view_rows(store, rows),
                     "as_of": _format_datetime(timestamp),
+                    "page": page,
+                    "limit": limit,
+                    "total_open": store.count_worklist_cases(owner=owner, urgent=urgent, state=state),
                 },
             )
         return rows

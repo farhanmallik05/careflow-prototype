@@ -163,6 +163,7 @@ def test_worklist_uses_engine_ordering_urgent_before_most_overdue(tmp_path):
 
 def test_health_endpoints_expose_safe_mode_and_readiness_without_case_data(tmp_path):
     with make_client(tmp_path) as client:
+        # Test original routes
         live = client.get("/health/live")
         ready = client.get("/health/ready")
         assert live.status_code == 200
@@ -170,3 +171,35 @@ def test_health_endpoints_expose_safe_mode_and_readiness_without_case_data(tmp_p
         assert ready.status_code == 200
         assert ready.json()["status"] == "ready"
         assert "cases" not in ready.text
+
+        # Test direct aliases /health and /ready
+        direct_health = client.get("/health")
+        direct_ready = client.get("/ready")
+        assert direct_health.status_code == 200
+        assert direct_health.json()["status"] == "ok"
+        assert direct_ready.status_code == 200
+        assert direct_ready.json()["status"] == "ready"
+
+
+def test_outbox_worker_dispatches_messages(tmp_path):
+    import asyncio
+    from careflow.worker import OutboxWorker
+
+    with make_client(tmp_path) as client:
+        store = client.app.state.store
+        notification_id = store.enqueue_notification(
+            event="system_alert",
+            channel="internal",
+            recipient="ops@careflow.test",
+            payload={"message": "System status check"},
+        )
+        assert len(store.pending_notifications()) == 1
+
+        worker = OutboxWorker(store, poll_interval=0.1)
+        dispatched = asyncio.run(worker.dispatch_once())
+        assert dispatched == 1
+        assert len(store.pending_notifications()) == 0
+        outbox_row = store.list_outbox()[0]
+        assert outbox_row["status"] == "sent"
+        assert outbox_row["sent_at"] is not None
+

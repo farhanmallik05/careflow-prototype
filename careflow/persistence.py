@@ -480,6 +480,7 @@ USER_ROLES = frozenset(
         "specialist",
         "care_coordinator",
         "clinician_on_call",
+        "clinical_supervisor",
         "patient",
     }
 )
@@ -496,6 +497,7 @@ class User:
     email: str | None = None
     is_active: bool = True
     created_at: datetime | None = None
+    certified_languages: tuple[str, ...] = ("en",)
 
     def __post_init__(self) -> None:
         if self.role and self.role not in USER_ROLES:
@@ -701,6 +703,7 @@ class SQLiteStore:
         self.path = str(path)
         self._lock = threading.RLock()
         self.startup_error: DatabaseLifecycleError | None = None
+        self._user_certified_languages: dict[str, tuple[str, ...]] = {}
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         # FastAPI's synchronous TestClient and request handlers may run on a
@@ -718,6 +721,8 @@ class SQLiteStore:
             self.connection.execute("PRAGMA foreign_keys = ON")
             self.connection.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
             self.connection.execute("PRAGMA synchronous = FULL")
+            if self.path != ":memory:":
+                self.connection.execute("PRAGMA journal_mode = WAL")
         except sqlite3.DatabaseError as exc:
             self.startup_error = DatabaseLifecycleError(f"database connection is unreadable: {exc}")
             return
@@ -734,6 +739,9 @@ class SQLiteStore:
 
         with self._lock:
             self._run_migrations()
+            self.connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_cases_worklist_active ON cases(closed, owner, urgent, entered_at)"
+            )
             self._validate_schema_contract()
 
     @property
@@ -992,6 +1000,8 @@ class SQLiteStore:
 
     def add_user(self, user: User) -> None:
         created_at = user.created_at or datetime.now(timezone.utc)
+        if getattr(user, "certified_languages", None):
+            self._user_certified_languages[user.id] = tuple(user.certified_languages)
         with self.connection:
             self.connection.execute(
                 """
@@ -1017,6 +1027,7 @@ class SQLiteStore:
             email=row["email"],
             is_active=bool(row["is_active"]),
             created_at=_datetime(row["created_at"]),
+            certified_languages=self._user_certified_languages.get(user_id, ("en",)),
         )
 
     def list_users(self, *, role: str | None = None, active_only: bool = False) -> list[User]:
@@ -1039,6 +1050,7 @@ class SQLiteStore:
                 email=row["email"],
                 is_active=bool(row["is_active"]),
                 created_at=_datetime(row["created_at"]),
+                certified_languages=self._user_certified_languages.get(row["id"], ("en",)),
             )
             for row in rows
         ]
@@ -2086,6 +2098,54 @@ class SQLiteStore:
     def list_case_records(self) -> list[dict[str, Any]]:
         rows = self.connection.execute("SELECT * FROM cases ORDER BY id").fetchall()
         return [dict(row) for row in rows]
+
+    def get_worklist_cases(
+        self,
+        *,
+        owner: str | None = None,
+        urgent: bool | None = None,
+        state: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Query open cases directly via indexed SQL query with pagination."""
+        query = "SELECT * FROM cases WHERE closed = 0"
+        params: list[Any] = []
+        if owner is not None:
+            query += " AND owner = ?"
+            params.append(owner)
+        if urgent is not None:
+            query += " AND urgent = ?"
+            params.append(1 if urgent else 0)
+        if state is not None:
+            query += " AND state = ?"
+            params.append(state)
+        query += " ORDER BY urgent DESC, entered_at ASC LIMIT ? OFFSET ?"
+        params.extend([max(1, min(limit, 200)), max(0, offset)])
+        rows = self.connection.execute(query, tuple(params)).fetchall()
+        return [dict(row) for row in rows]
+
+    def count_worklist_cases(
+        self,
+        *,
+        owner: str | None = None,
+        urgent: bool | None = None,
+        state: str | None = None,
+    ) -> int:
+        """Count active open cases in the indexed SQL worklist."""
+        query = "SELECT COUNT(*) FROM cases WHERE closed = 0"
+        params: list[Any] = []
+        if owner is not None:
+            query += " AND owner = ?"
+            params.append(owner)
+        if urgent is not None:
+            query += " AND urgent = ?"
+            params.append(1 if urgent else 0)
+        if state is not None:
+            query += " AND state = ?"
+            params.append(state)
+        row = self.connection.execute(query, tuple(params)).fetchone()
+        return int(row[0]) if row else 0
 
     def has_valid_consent(
         self,

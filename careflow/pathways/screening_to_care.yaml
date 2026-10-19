@@ -1,14 +1,14 @@
 name: screening_to_care
 start: result_issued
-terminal: [closed]
-approvers: [clinician_on_call, care_coordinator]
+terminal: [closed, closed_unreachable, closed_refused, closed_transferred, closed_unreachable_exhausted]
+approvers: [clinician_on_call, care_coordinator, clinical_supervisor]
 states:
   result_issued:        {owner: lab, sla_hours: 24, next: {notify: {to: patient_notified}}}
-  patient_notified:     {owner: screening_program, sla_hours: 48, next: {acknowledge: {to: patient_acknowledged, requires: [ack_record]}, unreachable: {to: escalated}}}
+  patient_notified:     {owner: screening_program, sla_hours: 48, next: {acknowledge: {to: patient_acknowledged, requires: [ack_record]}, unreachable: {to: escalated}, refuse: {to: closed_refused, requires: [patient_refusal_documentation, supervisor_signoff]}}}
   patient_acknowledged: {owner: primary_care, sla_hours: 72, next: {review: {to: referral_created, requires: [clinical_review]}}}
   referral_created:     {owner: care_coordinator, sla_hours: 72, next: {accept: {to: referral_accepted, requires: [acceptance]}, reject: {to: referral_rejected}}}
   referral_rejected:    {owner: care_coordinator, sla_hours: 24, attention: true, next: {reassign: {to: referral_created}}}
   referral_accepted:    {owner: specialist, sla_hours: 168, next: {book: {to: appointment_booked, requires: [appointment]}}}
   appointment_booked:   {owner: specialist, sla_hours: 336, next: {attend: {to: care_received, requires: [attendance]}, no_show: {to: escalated}}}
   care_received:        {owner: care_coordinator, sla_hours: 72, next: {close: {to: closed, requires: [closure_note]}}}
-  escalated:            {owner: clinician_on_call, sla_hours: 12, attention: true, next: {resolve: {to: patient_notified, requires: [human_decision]}}}
+  escalated:            {owner: clinician_on_call, sla_hours: 12, attention: true, next: {resolve: {to: patient_notified, requires: [human_decision]}, unreachable: {to: closed_unreachable, requires: [unreachable_exhaustion_note]}, refuse: {to: closed_refused, requires: [patient_refusal_documentation, supervisor_signoff]}, transfer: {to: closed_transferred, requires: [transfer_of_care_record, supervisor_signoff]}, exhaust: {to: closed_unreachable_exhausted, requires: [outreach_exhaustion_protocol, supervisor_signoff]}}}

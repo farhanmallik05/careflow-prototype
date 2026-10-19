@@ -67,3 +67,58 @@ def test_simulation_deterministic_and_improves_under_assumptions():
     assert run(seed=7) == run(seed=7)
     r = compare()
     assert r["high"]["closure_rate"] >= r["medium"]["closure_rate"] >= r["low"]["closure_rate"] >= r["baseline"]["closure_rate"]
+
+
+def test_terminal_exception_branches_and_dual_signoff():
+    # 1. Test closed_unreachable from escalated
+    c1 = Case("C1", PW, T0)
+    c1.transition("notify", "u", T0)
+    c1.transition("unreachable", "u", T0 + timedelta(hours=1))
+    assert c1.state == "escalated"
+    c1.transition("unreachable", "u", T0 + timedelta(hours=2), evidence=["unreachable_exhaustion_note"])
+    assert c1.closed and c1.state == "closed_unreachable"
+
+    # 2. Test closed_refused requires dual supervisor sign-off
+    c2 = Case("C2", PW, T0)
+    c2.transition("notify", "u", T0)
+    c2.transition("unreachable", "u", T0 + timedelta(hours=1))
+    with pytest.raises(TransitionError, match="dual clinical supervisor sign-off"):
+        c2.transition("refuse", "u", T0 + timedelta(hours=2), evidence=["patient_refusal_documentation"])
+    # With dual supervisor sign-off
+    c2.transition(
+        "refuse",
+        "u",
+        T0 + timedelta(hours=2),
+        evidence=["patient_refusal_documentation", "supervisor_signoff"],
+        approval={"role": "clinical_supervisor", "note": "verified patient refusal protocol", "co_signer": "dr_lead"},
+        actor_role="clinical_supervisor",
+    )
+    assert c2.closed and c2.state == "closed_refused"
+
+    # 3. Test closed_transferred with co-signer approval
+    c3 = Case("C3", PW, T0)
+    c3.transition("notify", "u", T0)
+    c3.transition("unreachable", "u", T0 + timedelta(hours=1))
+    c3.transition(
+        "transfer",
+        "u",
+        T0 + timedelta(hours=2),
+        evidence=["transfer_of_care_record", "supervisor_signoff"],
+        approval={"role": "clinician_on_call", "note": "transferred to regional oncology", "co_signer": "dr_supervisor"},
+        actor_role="clinician_on_call",
+    )
+    assert c3.closed and c3.state == "closed_transferred"
+
+    # 4. Test closed_unreachable_exhausted
+    c4 = Case("C4", PW, T0)
+    c4.transition("notify", "u", T0)
+    c4.transition("unreachable", "u", T0 + timedelta(hours=1))
+    c4.transition(
+        "exhaust",
+        "u",
+        T0 + timedelta(hours=2),
+        evidence=["outreach_exhaustion_protocol", "supervisor_signoff"],
+        approval={"role": "clinician_on_call", "note": "all outreach exhausted", "co_signer": "clinical_supervisor"},
+        actor_role="clinician_on_call",
+    )
+    assert c4.closed and c4.state == "closed_unreachable_exhausted"
