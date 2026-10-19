@@ -175,7 +175,7 @@
 
 **Synthetic seed command:**
 - Location: `careflow/seed.py` (`main`, `seed_demo`).
-- Triggers: `python -m careflow.seed --db careflow.db` or `make seed-demo`; also invoked by `Dockerfile` during image build.
+- Triggers: `python -m careflow.seed --db careflow.db` or `make seed-demo`; the Dockerfile invokes the same seed command only at first start when `/data/careflow.db` is absent.
 - Responsibilities: Create/reset deterministic synthetic users, cases, consents, audit/evidence/approval records, and consent-gated attention rows.
 
 **Console demonstration:**

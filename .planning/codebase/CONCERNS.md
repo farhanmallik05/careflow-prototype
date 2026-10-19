@@ -29,7 +29,7 @@
 - Fix approach: Publish one canonical request shape, deprecate aliases with explicit compatibility tests, and either remove ignored actor fields or rename them to non-authoritative client metadata.
 
 **Container and lock reproducibility is incomplete (Medium):**
-- Issue: `Dockerfile` uses the floating `python:3.12-slim` tag, installs version pins without hashes, has no `.dockerignore`, runs as root, and copies the entire build context. `.gitignore` does not control Docker build context, so `.git`, `.planning`, caches, virtual environments, and `careflow.db` can enter the image.
+- Resolved for the rebuildability baseline: `Dockerfile` now uses a digest-pinned Python 3.12.12 image, installs version-pinned requirements, copies only runtime inputs, runs as non-root, declares `/data`, and has a healthcheck. The lock remains version-pinned rather than hash-verified, and persistence still depends on an operator-managed volume.
 - Files: `Dockerfile`, `requirements.lock`, `.gitignore`, `careflow.db`
 - Impact: Builds can change when the base image changes, image contents can include local data or development artifacts, and the service has unnecessary root privileges.
 - Fix approach: Pin the base image digest, use hash-checked dependencies, add `.dockerignore`, create a non-root runtime user, and mount a deliberate data volume rather than copying a local database.
@@ -181,7 +181,7 @@
 - Migration plan: Declare and pin the direct dependency, regenerate `requirements.lock`, and verify the exact `python -m uvicorn careflow.api:app` command in a clean image.
 
 **Floating Python base image and unhashed wheels (Medium):**
-- Risk: `Dockerfile` selects `python:3.12-slim` by mutable tag, while `requirements.lock` pins versions without artifact hashes.
+- Remaining risk: `requirements.lock` pins versions without artifact hashes, and the Docker base digest must be deliberately refreshed when the supported Python patch changes.
 - Impact: Rebuilds can receive different OS or wheel artifacts, and supply-chain verification is weaker than the project’s reproducibility requirement.
 - Migration plan: Pin a base-image digest and generate a hash-checked lock file from a clean Python 3.12 environment.
 
@@ -246,7 +246,7 @@
 - Priority: Medium
 
 **Clean build and runtime verification:**
-- What's not tested: Installing exactly `requirements.lock` in a fresh Python 3.12 environment, importing the app without globally installed packages, Docker build context contents, non-root execution, and persistence across container replacement.
+- What's not tested in this host session: installing exactly `requirements.lock` under CPython 3.12.12, the Docker build/run/healthcheck, non-root execution, and persistence across container replacement because the available host is Python 3.13 and the Docker daemon is unavailable.
 - Files: `Dockerfile`, `requirements.txt`, `requirements.lock`, `README.md`, `Makefile`
 - Risk: The advertised rebuild-from-scratch workflow can fail before functional tests run.
 - Priority: High

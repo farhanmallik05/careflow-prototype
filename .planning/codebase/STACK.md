@@ -16,7 +16,7 @@
 ## Runtime
 
 **Environment:**
-- Python 3.12 - supported interpreter selected by `.python-version`; the container currently uses the mutable `python:3.12-slim` tag in `Dockerfile`.
+- Python 3.12.12 - exact interpreter selected by `.python-version`; the container uses the digest-pinned `python:3.12.12-slim` image in `Dockerfile`.
 - ASGI - `careflow.api:app` is served by Uvicorn; `careflow/app.py` provides a compatibility re-export.
 
 **Package Manager:**
@@ -37,7 +37,7 @@
 - FastAPI `TestClient` with httpx 0.28.1 - synchronous in-process API/HTML tests in `tests/test_api.py`, `tests/test_auth.py`, `tests/test_messages.py`, and `tests/test_html.py`; the application has no outbound HTTP client.
 
 **Build/Dev:**
-- Docker - runtime image definition and build-time deterministic seeding in `Dockerfile`.
+- Docker - digest-pinned runtime image, first-start deterministic seed, non-root user, healthcheck, and `/data` volume in `Dockerfile`.
 - Make - the only project command aliases in `Makefile`: `make test`, `make demo`, and `make seed-demo`.
 - No `pyproject.toml`, `setup.py`, package build metadata, formatter, linter, or console-script entry point is present; run modules from the repository root with `python -m ...`.
 
@@ -67,7 +67,7 @@
 **Build:**
 - `requirements.txt` - direct dependency pins.
 - `requirements.lock` - exact resolved versions installed by the container and clean-machine setup.
-- `.python-version` - Python 3.12 runtime pin.
+- `.python-version` - exact Python 3.12.12 runtime pin.
 - `Dockerfile` - base image, locked dependency install, source copy, deterministic seed, and Uvicorn command.
 - `.dockerignore` - excludes local databases, virtual environments, caches, and local secrets from the Docker context.
 - `Makefile` and `README.md` - the canonical local test, seed, demo, run, and Docker usage instructions.
@@ -84,8 +84,8 @@
 
 ## Current Gaps and Milestone Assumptions
 
-- The runtime is pinned only to Python 3.12 at the major/minor level, the Docker base image uses a floating `python:3.12-slim` tag, and `requirements.lock` has version pins but no hashes. These are current reproducibility limitations, not implemented guarantees.
-- The Dockerfile currently runs as root, copies the build context, seeds a database during image build, and does not define a health check or data volume. `.dockerignore` excludes `careflow.db` but does not exclude all development/planning content.
+- The local runtime and Docker base are pinned to Python 3.12.12; `requirements.lock` has version pins but no artifact hashes, so dependency reproducibility is version-level rather than hash-verified.
+- The Dockerfile seeds only an empty `/data` volume at first start, runs as non-root, and defines a healthcheck. Persistent data still requires an operator-managed named volume or equivalent writable storage.
 - The `.planning/PROJECT.md` active requirements for managed OIDC/SSO, fail-closed production secrets, migrations/backup, health diagnostics, and deployment runbooks are milestone targets; no provider, migration framework, or deployment integration is present in the current stack.
 
 ---

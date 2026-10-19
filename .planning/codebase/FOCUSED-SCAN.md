@@ -23,7 +23,7 @@ The repository's supported runtime is Python 3.12 from `.python-version`. The lo
 ## Reproducibility surface
 
 - `requirements.txt` directly pins FastAPI, HTTPX, itsdangerous, Jinja2, PyYAML, pytest, and Uvicorn; `requirements.lock` pins the resolved transitive set.
-- `Dockerfile` uses `python:3.12-slim`, installs the lock, copies the context, seeds `careflow.db` at build time, and starts Uvicorn on port 8000.
+- `Dockerfile` uses the digest-pinned Python 3.12.12 image, installs the lock, copies only runtime inputs, seeds `/data/careflow.db` only at first start when absent, runs non-root with a healthcheck, and starts Uvicorn on port 8000.
 - `Makefile` exposes the single test command `make test` plus `make demo` and `make seed-demo`; `README.md` documents local setup, API/dashboard use, Docker run, safety, and deployment examples.
 - `.dockerignore` excludes local DBs, virtual environments, caches, and `.env`; `.gitignore` excludes local DBs, caches, virtual environments, and `.env`. `.env.example` exists as a template; no secret value was read or written.
 
@@ -32,7 +32,7 @@ The repository's supported runtime is Python 3.12 from `.python-version`. The lo
 - Signed sessions are demo identity selection: `/auth/login` accepts an active local user ID, not a password or OIDC/SSO assertion. If no secret env var is supplied, `create_app` generates a process-local random signing secret. Cookie `Secure`, CSRF protection, external identity, session revocation, and owner-ID enforcement are not implemented.
 - SQLite has no schema version/migration path, backup/restore integration, connection lock/concurrency policy, optimistic versioning, or multi-process topology. `load_case` rehydrates stored rows without replaying the entire transition history.
 - The outbox is a local, consent-gated queue. There is no delivery worker, external transport, claim/retry workflow, or webhook. Approved patient drafts remain `queued` and are not sent.
-- Docker remains a development-grade container contract: floating base tag, unhashed dependency artifacts, root process, build-time database seed, no health check, and no deliberate persistent volume. No CI/CD or external hosting manifest exists.
+- Docker now has an immutable base reference, non-root process, first-start volume seed, healthcheck, and explicit `/data` volume. Remaining limits are version-only Python dependency pins without hashes, no automated volume backup, no CI/CD, and no external hosting manifest.
 - `.planning/PROJECT.md` active requirements for managed identity, fail-closed production configuration, consistent authorization, migrations/operations, structured diagnostics, retention, and deployment runbooks are milestone assumptions rather than current implementation.
 
 ## Existing artifact note

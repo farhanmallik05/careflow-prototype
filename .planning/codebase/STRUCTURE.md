@@ -37,7 +37,7 @@ careflow-prototype/
 ├── .planning/
 │   ├── PROJECT.md                    # Milestone context and requirements
 │   └── codebase/                     # Generated architecture/structure mapping documents
-├── .python-version                   # Python runtime pin (3.12)
+├── .python-version                   # Exact Python runtime pin (3.12.12)
 ├── requirements.txt                  # Direct dependency pins
 ├── requirements.lock                 # Fully pinned install set
 ├── Dockerfile                        # Reproducible API container build/run

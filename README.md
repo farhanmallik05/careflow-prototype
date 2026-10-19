@@ -6,22 +6,27 @@ CareFlow is a pathway-driven case-orchestration prototype for a screening-result
 
 ## Reproducible setup
 
-The supported runtime is Python 3.12, pinned in `.python-version`. `requirements.lock` is the reproducible install input; `requirements.txt` is the short, direct-dependency list.
+The supported runtime is CPython **3.12.12**, pinned exactly in `.python-version`. `requirements.lock` is the reproducible, version-pinned install input; `requirements.txt` is the short direct-dependency list. The lockfile does not contain artifact hashes, so it provides version reproducibility rather than hash verification.
 
 On Linux or macOS:
 
 ```bash
-python3.12 --version
-python3.12 -m venv .venv
+# Provision CPython 3.12.12 with pyenv or an equivalent CPython installer first.
+pyenv install 3.12.12       # no-op if already installed
+pyenv local 3.12.12
+test "$(python --version | awk '{print $2}')" = "$(tr -d '\r\n' < .python-version)"
+python -m venv .venv
 source .venv/bin/activate
 python -m pip install --requirement requirements.lock
 ```
 
+GNU Make is required for the canonical test command. Install it with the Linux distribution's package manager if it is not already present. If an exact local CPython 3.12.12 installation is not available, use the digest-pinned Docker path below; do not silently substitute another Python patch version.
+
 On Windows PowerShell, use the same pinned interpreter and lockfile:
 
 ```powershell
-py -3.12 --version
-py -3.12 -m venv .venv
+py -3.12.12 --version
+py -3.12.12 -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install --requirement requirements.lock
 ```
@@ -62,40 +67,58 @@ Run the single project test command after dependencies are installed:
 make test
 ```
 
-`make test` runs `python -m pytest -q`. The tests use temporary SQLite databases and deterministic clocks/seeds; they do not call a network service. The direct equivalent is useful on machines without `make`:
-
-```bash
-python -m pytest -q
-```
+`make test` is the one canonical test command and runs `python -m pytest -q`. The tests use temporary SQLite databases and deterministic clocks/seeds; after the lockfile installation they do not call a network service. `python -m pytest -q` is the underlying diagnostic command, but `make test` is the reproducibility contract.
 
 ## Docker and deployment
 
-The `Dockerfile` uses `python:3.12-slim`, installs exactly `requirements.lock`, copies the application, seeds `careflow.db` during the image build, and starts Uvicorn on `0.0.0.0:8000`. `.dockerignore` excludes any local database so the image always receives a fresh deterministic seed.
+The `Dockerfile` uses the immutable `python:3.12.12-slim` image digest, installs exactly `requirements.lock`, copies only the runtime package, runs as the non-root `careflow` user, and serves Uvicorn on `0.0.0.0:8000`. It declares `/data` as the SQLite volume and seeds `/data/careflow.db` only when the volume is empty. The image healthcheck verifies that the seeded landing page is available. `.dockerignore` excludes local databases, development files, planning artifacts, and environment files from the build context.
 
 Build and run locally:
 
 ```bash
+export CAREFLOW_SESSION_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+docker volume create careflow-data
 docker build -t careflow:local .
 docker run --rm -p 8000:8000 \
+  --name careflow \
+  --volume careflow-data:/data \
   -e CAREFLOW_SESSION_SECRET="$CAREFLOW_SESSION_SECRET" \
   -e CAREFLOW_SESSION_MAX_AGE=3600 \
   -e CAREFLOW_MESSAGE_PROVIDER=rule_based \
   careflow:local
 ```
 
-For a registry-based deployment, build and push the same image, then supply the deployment-only secret from the platform's secret manager:
+Open <http://127.0.0.1:8000/> after the container reports healthy. The first start creates the 40-case synthetic fixture in the named volume; later starts reuse it. The session secret is supplied at runtime and is never copied into the image.
+
+To replace the image while preserving the SQLite data volume:
 
 ```bash
-docker build -t registry.example/careflow:step-7 .
-docker push registry.example/careflow:step-7
+docker build -t careflow:local .
+docker rm -f careflow
 docker run -d --name careflow --restart unless-stopped -p 8000:8000 \
+  --volume careflow-data:/data \
   -e CAREFLOW_SESSION_SECRET="$CAREFLOW_SESSION_SECRET" \
   -e CAREFLOW_SESSION_MAX_AGE=3600 \
   -e CAREFLOW_MESSAGE_PROVIDER=rule_based \
-  registry.example/careflow:step-7
+  careflow:local
 ```
 
-Replace `registry.example/careflow:step-7` with the target image name. Never put the session secret in the image, source files, or committed configuration. Docker build/install needs the base image and locked packages available; after installation, the test suite and application itself do not require an external service.
+For a portable host-to-host transfer without a registry:
+
+```bash
+docker save careflow:local | gzip > careflow-image.tar.gz
+# Copy careflow-image.tar.gz to the target host through your approved channel.
+gunzip -c careflow-image.tar.gz | docker load
+docker volume create careflow-data
+docker run -d --name careflow --restart unless-stopped -p 8000:8000 \
+  --volume careflow-data:/data \
+  -e CAREFLOW_SESSION_SECRET="$CAREFLOW_SESSION_SECRET" \
+  -e CAREFLOW_SESSION_MAX_AGE=3600 \
+  -e CAREFLOW_MESSAGE_PROVIDER=rule_based \
+  careflow:local
+```
+
+Never put the session secret in the image, source files, or committed configuration. Docker build/install needs the base image and locked packages available; after installation, the test suite and application itself do not require an external service. The generated `careflow-image.tar.gz` is ignored by Git.
 
 ## HTTP API and dashboard usage
 

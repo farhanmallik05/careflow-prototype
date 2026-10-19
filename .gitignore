@@ -6,4 +6,11 @@ venv/
 *.py[cod]
 careflow.db
 careflow*.sqlite3
+*.db-wal
+*.db-shm
+*.sqlite-wal
+*.sqlite-shm
+careflow-data/
+*.tar
+*.tar.gz
 .env

@@ -1,3 +1,5 @@
+.PHONY: test demo seed-demo
+
 test:
 	python -m pytest -q
 demo:

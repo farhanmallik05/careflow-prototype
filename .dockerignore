@@ -8,3 +8,17 @@ __pycache__
 *.py[cod]
 careflow.db
 careflow*.sqlite3
+*.db-wal
+*.db-shm
+*.sqlite-wal
+*.sqlite-shm
+.planning
+tests
+docs
+*.md
+Makefile
+AGENTS.md
+requirements.txt
+.env.example
+*.tar
+*.tar.gz

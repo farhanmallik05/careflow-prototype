@@ -52,7 +52,7 @@
 ## CI/CD & Deployment
 
 **Hosting:**
-- Local process or container only - `README.md` starts Uvicorn directly, and `Dockerfile` builds `python:3.12-slim`, installs `requirements.lock`, seeds a demo database during build, and listens on port 8000. No provider-specific hosting or infrastructure manifest is present.
+- Local process or container only - `README.md` starts Uvicorn directly, and `Dockerfile` builds the digest-pinned Python 3.12.12 image, installs `requirements.lock`, seeds an empty `/data` volume at first start, runs non-root with a healthcheck, and listens on port 8000. No provider-specific hosting or infrastructure manifest is present.
 
 **CI Pipeline:**
 - None detected. `Makefile` provides `make test`, `make demo`, and `make seed-demo`; no GitHub Actions, registry workflow, release pipeline, or deployment automation is present.

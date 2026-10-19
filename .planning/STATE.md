@@ -55,8 +55,14 @@ None yet. See `.planning/todos/pending/` if ideas are captured later.
 - [Phase 4]: Owner versus same-role delegate/team scope and consent purpose/retention semantics need explicit product-policy decisions.
 - [Phase 6]: Supported host, writable-volume behavior, proxy/TLS trust, backup destination, and honest RPO/RTO remain deployment-dependent.
 
+### Quick Tasks Completed
+
+| # | Description | Date | Commit | Status | Directory |
+|---|-------------|------|--------|--------|-----------|
+| 261019-4dn | Validate and repair clean Linux rebuildability | 2026-10-19 | pending | Needs Review (Docker daemon/GNU Make/CPython 3.12 unavailable on host) | [261019-4dn-validate-make-this-project-rebuildable-f](./quick/261019-4dn-validate-make-this-project-rebuildable-f/) |
+
 ## Session Continuity
 
 Last session: 2026-10-19
-Stopped at: Roadmap artifacts were written; no application code was modified and no commit was created.
+Stopped at: Clean rebuild contract repaired; local tests and static checks pass, while Docker/GNU Make/CPython 3.12 verification remain host-limited.
 Resume file: None
