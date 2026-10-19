@@ -59,7 +59,7 @@ None yet. See `.planning/todos/pending/` if ideas are captured later.
 
 | # | Description | Date | Commit | Status | Directory |
 |---|-------------|------|--------|--------|-----------|
-| 261019-4dn | Validate and repair clean Linux rebuildability | 2026-10-19 | pending | Needs Review (Docker daemon/GNU Make/CPython 3.12 unavailable on host) | [261019-4dn-validate-make-this-project-rebuildable-f](./quick/261019-4dn-validate-make-this-project-rebuildable-f/) |
+| 261019-4dn | Validate and repair clean Linux rebuildability | 2026-10-19 | f08fa84 | Needs Review (Docker daemon/GNU Make/CPython 3.12 unavailable on host) | [261019-4dn-validate-make-this-project-rebuildable-f](./quick/261019-4dn-validate-make-this-project-rebuildable-f/) |
 
 ## Session Continuity
 
