@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
 import logging
+from datetime import datetime, timezone
 
 from careflow.persistence import SQLiteStore
 
@@ -69,7 +69,7 @@ class OutboxWorker:
                     notification["id"],
                     notification.get("recipient"),
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.error(
                     "Failed to dispatch notification %s: %s",
                     notification.get("id"),
@@ -82,7 +82,7 @@ class OutboxWorker:
         while self._running:
             try:
                 await self.dispatch_once()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.error("OutboxWorker iteration error: %s", exc)
             try:
                 await asyncio.sleep(self.poll_interval)

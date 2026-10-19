@@ -50,7 +50,6 @@ from typing import Any, Iterable, Mapping
 
 from careflow.engine import Case, Pathway
 
-
 AuditEvent = Mapping[str, Any]
 _DROP_OFF_ACTIONS = frozenset({"unreachable", "no_show", "reject", "escalated", "escalate"})
 

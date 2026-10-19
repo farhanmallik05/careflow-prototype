@@ -12,7 +12,6 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-
 ENVELOPE_PREFIX = "env:v1:"
 DEMOGRAPHIC_FIELDS = {"patient_name", "name", "phone", "email", "dob", "mrn", "address"}
 

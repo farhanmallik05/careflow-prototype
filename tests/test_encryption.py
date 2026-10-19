@@ -1,11 +1,12 @@
 import pytest
-from careflow.encryption import EnvelopeEncryptor, ENVELOPE_PREFIX
+
+from careflow.encryption import ENVELOPE_PREFIX, EnvelopeEncryptor
 
 
 def test_envelope_encryption_roundtrip():
     encryptor = EnvelopeEncryptor(master_key="hospital-master-key-secure-2026")
     plaintext = "Jane Doe, DOB: 1982-04-12, MRN: #994827"
-    
+
     token = encryptor.encrypt(plaintext)
     assert token.startswith(ENVELOPE_PREFIX)
     assert plaintext not in token  # PHI is fully obscured
@@ -17,7 +18,7 @@ def test_envelope_encryption_roundtrip():
 def test_envelope_encryption_idempotency_and_legacy_fallback():
     encryptor = EnvelopeEncryptor(master_key="hospital-master-key-secure-2026")
     plaintext = "John Smith"
-    
+
     # Legacy plaintext without prefix passes through transparently
     assert encryptor.decrypt(plaintext) == plaintext
 
@@ -62,7 +63,7 @@ def test_envelope_encryption_tamper_detection():
 def test_envelope_encryption_wrong_key_fails():
     encryptor1 = EnvelopeEncryptor(master_key="key-alpha-1234567890123456")
     encryptor2 = EnvelopeEncryptor(master_key="key-beta-98765432109876543")
-    
+
     token = encryptor1.encrypt("Secret Patient Details")
     with pytest.raises(ValueError, match="Failed to decrypt demographic envelope token"):
         encryptor2.decrypt(token)

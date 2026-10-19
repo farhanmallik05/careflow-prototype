@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import re
+from dataclasses import dataclass, field
 from typing import Any, Mapping
-
 
 # Verified clinical cancer screening protocols
 CLINICAL_GUIDELINES: dict[str, dict[str, Any]] = {

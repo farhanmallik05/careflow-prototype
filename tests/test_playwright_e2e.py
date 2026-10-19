@@ -3,14 +3,14 @@
 import threading
 import time
 from pathlib import Path
+
 import pytest
-from playwright.sync_api import sync_playwright
 import uvicorn
+from playwright.sync_api import sync_playwright
 
 from careflow.api import create_app
 from careflow.engine import Pathway
 from careflow.persistence import User
-
 
 PATHWAY = Pathway.load(Path(__file__).parent.parent / "careflow" / "pathways" / "screening_to_care.yaml")
 HOST = "127.0.0.1"
@@ -34,11 +34,12 @@ def live_server(tmp_path_factory):
     # Wait for server to boot
     for _ in range(50):
         try:
+            import urllib.error
             import urllib.request
             with urllib.request.urlopen(f"{BASE_URL}/health", timeout=0.5) as resp:
                 if resp.status == 200:
                     break
-        except Exception:
+        except (OSError, urllib.error.URLError):
             time.sleep(0.1)
 
     yield BASE_URL

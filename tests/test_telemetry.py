@@ -1,5 +1,7 @@
 import asyncio
+
 import pytest
+
 from careflow.telemetry import (
     clear_in_memory_spans,
     get_in_memory_spans,

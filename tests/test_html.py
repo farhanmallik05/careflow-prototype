@@ -2,7 +2,6 @@ from datetime import timedelta
 
 from tests.test_api import T0, login, make_client, open_case
 
-
 HTML = {"Accept": "text/html"}
 
 

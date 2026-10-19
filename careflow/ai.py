@@ -10,12 +10,11 @@ this prototype does not make a network request or require an API key for it.
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
 import os
 import re
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any, Mapping
-
 
 REVIEW_FLAG = "needs clinical-language review"
 DEFAULT_TEMPLATE = "care_update"

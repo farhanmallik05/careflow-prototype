@@ -10,12 +10,12 @@ without making a network request.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import base64
 import hashlib
 import hmac
 import json
 import secrets
+from dataclasses import dataclass
 from typing import Any, Mapping, Protocol
 from urllib.parse import urlencode
 

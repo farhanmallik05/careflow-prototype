@@ -1,9 +1,9 @@
+from fastapi.testclient import TestClient
+
 from careflow.api import create_app
 from careflow.persistence import User
 from careflow.seed import seed_demo
-from fastapi.testclient import TestClient
-
-from tests.test_api import T0, make_client, login, open_case
+from tests.test_api import T0, login, make_client, open_case
 
 
 def advance_to_care_received(client, case_id="CASE-1"):

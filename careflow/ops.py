@@ -9,22 +9,21 @@ is verified before the new file is selected by an operator.
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, dataclass, replace
-from datetime import datetime, timezone
 import json
-from pathlib import Path
 import sqlite3
 import sys
+from dataclasses import asdict, dataclass, replace
+from datetime import datetime, timezone
+from pathlib import Path
 from uuid import uuid4
 
 from careflow.engine import Pathway
 from careflow.persistence import (
     CURRENT_SCHEMA_VERSION,
-    DatabaseLifecycleError,
     SQLITE_BUSY_TIMEOUT_MS,
+    DatabaseLifecycleError,
     SQLiteStore,
 )
-
 
 PATHWAY_FILE = Path(__file__).parent / "pathways" / "screening_to_care.yaml"
 

@@ -2,9 +2,8 @@ from datetime import timedelta
 
 from fastapi.testclient import TestClient
 
-from careflow.ai import LLMProvider, REVIEW_FLAG, RuleBasedProvider
+from careflow.ai import REVIEW_FLAG, LLMProvider, RuleBasedProvider
 from careflow.persistence import Consent
-
 from tests.test_api import T0, login, make_client, open_case
 
 

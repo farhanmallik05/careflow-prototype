@@ -1,6 +1,6 @@
-from datetime import datetime, timedelta, timezone
 import json
 import sqlite3
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -10,15 +10,14 @@ from careflow.engine import Case, Pathway
 from careflow.ops import backup_database, restore_database, verify_database
 from careflow.persistence import (
     CURRENT_SCHEMA_VERSION,
-    DatabaseIntegrityError,
-    DatabaseLifecycleError,
     SCHEMA,
     Consent,
+    DatabaseIntegrityError,
+    DatabaseLifecycleError,
     SQLiteStore,
     User,
 )
 from careflow.seed import DEMO_NOW, seed_demo
-
 
 PATHWAY = Pathway.load("careflow/pathways/screening_to_care.yaml")
 T0 = datetime(2026, 11, 1, 9)

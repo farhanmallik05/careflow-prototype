@@ -5,7 +5,6 @@ from careflow.engine import Case, Pathway
 from careflow.metrics import compute_metrics
 from careflow.persistence import SQLiteStore
 
-
 PATHWAY = Pathway.load(Path(__file__).parent.parent / "careflow" / "pathways" / "screening_to_care.yaml")
 T0 = datetime(2026, 11, 1, 9)
 

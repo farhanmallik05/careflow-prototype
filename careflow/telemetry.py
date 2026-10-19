@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 import functools
+from contextlib import contextmanager
 from typing import Any, Callable, Generator, Mapping, TypeVar
 
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-
 
 _EXPORTER: InMemorySpanExporter | None = None
 _INITIALIZED: bool = False

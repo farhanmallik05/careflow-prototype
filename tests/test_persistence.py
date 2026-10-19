@@ -6,7 +6,6 @@ from careflow.engine import Case, Pathway
 from careflow.persistence import Consent, SQLiteStore, User
 from careflow.seed import DEMO_NOW, seed_demo
 
-
 PW = Pathway(
     {
         "name": "test_pathway",

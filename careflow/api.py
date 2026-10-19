@@ -7,13 +7,13 @@ snapshot; they never assign a new case state themselves.
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
 import hashlib
 import secrets
 import sqlite3
 import threading
 import time
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import quote
@@ -26,12 +26,12 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from careflow.ai import (
-    AIProvider,
     DEFAULT_TEMPLATE,
-    ProviderError,
-    ProviderUnavailableError,
     REVIEW_FLAG,
     SUPPORTED_TEMPLATES,
+    AIProvider,
+    ProviderError,
+    ProviderUnavailableError,
     create_message_provider,
     normalize_language,
     normalize_template,
@@ -57,7 +57,6 @@ from careflow.persistence import (
 )
 from careflow.sim import compare
 from careflow.worker import OutboxWorker
-
 
 PATHWAY_FILE = Path(__file__).parent / "pathways" / "screening_to_care.yaml"
 TEMPLATES_DIR = Path(__file__).parent / "templates"

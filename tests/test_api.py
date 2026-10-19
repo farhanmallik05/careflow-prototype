@@ -7,7 +7,6 @@ from careflow.api import create_app
 from careflow.engine import Pathway
 from careflow.persistence import User
 
-
 PATHWAY = Pathway.load(Path(__file__).parent.parent / "careflow" / "pathways" / "screening_to_care.yaml")
 T0 = datetime(2026, 11, 1, 9)
 
@@ -183,6 +182,7 @@ def test_health_endpoints_expose_safe_mode_and_readiness_without_case_data(tmp_p
 
 def test_outbox_worker_dispatches_messages(tmp_path):
     import asyncio
+
     from careflow.worker import OutboxWorker
 
     with make_client(tmp_path) as client:

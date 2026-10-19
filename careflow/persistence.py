@@ -8,19 +8,18 @@ message drafts and notifications) in separate tables.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
 import hashlib
 import json
 import os
-from pathlib import Path
 import sqlite3
 import threading
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Mapping
 from uuid import uuid4
 
 from careflow.engine import Case, Pathway
-
 
 CURRENT_SCHEMA_VERSION = 2
 LEGACY_PHASE3_SCHEMA_VERSION = 3

@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timedelta
 import json
 import os
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterable
 
 from careflow.engine import Case, Pathway, explain
 from careflow.persistence import Consent, SQLiteStore, User
-
 
 DEMO_NOW = datetime(2026, 11, 1, 9, 0)
 PATHWAY_FILE = Path(__file__).parent / "pathways" / "screening_to_care.yaml"

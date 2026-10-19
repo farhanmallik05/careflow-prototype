@@ -1,14 +1,13 @@
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from fastapi.testclient import TestClient
 
 from careflow.api import create_app
 from careflow.config import CareFlowSettings
 from careflow.engine import Pathway
 from careflow.oidc import FakeOIDCProvider
 from careflow.persistence import User
-from fastapi.testclient import TestClient
-
 
 PATHWAY = Pathway.load("careflow/pathways/screening_to_care.yaml")
 T0 = datetime(2026, 11, 1, 9, tzinfo=timezone.utc)
